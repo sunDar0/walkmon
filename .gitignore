@@ -41,3 +41,7 @@ example
 # generated native folders
 /ios
 /android
+/_workspace
+
+# sample/concept assets (temporary GBA art, not committed)
+/sample

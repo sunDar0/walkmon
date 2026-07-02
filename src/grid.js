@@ -1,8 +1,8 @@
 import { latLngToCell, cellToBoundary, gridDisk } from 'h3-js';
 
-// H3 육각 셀 해상도. 10 ≈ 한 칸 폭 약 130m(보행 적합).
-// 자동차 이동까지 노리면 9로 낮추세요(칸이 커집니다).
-export const H3_RESOLUTION = 10;
+// H3 육각 셀 해상도. 11 ≈ 한 칸 폭 약 50m(보행에 촘촘, 방향 전환·고정 줌 뷰용).
+// 10으로 낮추면 한 칸 폭 약 130m, 9면 자동차 이동용으로 더 커집니다.
+export const H3_RESOLUTION = 11;
 
 // 좌표 → 육각 셀 키(H3 인덱스). 이 키 자체가 "지역" 식별자입니다.
 export function cellKeyAt(lat, lng, res = H3_RESOLUTION) {

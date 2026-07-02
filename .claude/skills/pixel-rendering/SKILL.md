@@ -1,8 +1,8 @@
 ---
 name: pixel-rendering
 description: >-
-  walkmon 도트(픽셀) 렌더링 작업을 수행한다. react-native-skia 로 정사각 바닥
-  타일맵 + H3 헥스 점령 오버레이 + 중앙 캐릭터 스프라이트를 그리고, nearest-neighbor
+  walkmon 도트(픽셀) 렌더링 작업을 수행한다. react-native-skia 로 보드 배경 +
+  H3 헥스 도트 타일맵 + 중앙 캐릭터 스프라이트를 그리고, nearest-neighbor
   정수배 스케일로 픽셀을 선명하게 유지하며, H3 cellToBoundary 위경도를 화면 픽셀로
   투영하고, 플레이어=화면중앙 카메라/스크롤을 구현한다. 트리거 — 도트/픽셀 그래픽,
   Skia 렌더, 타일맵/스프라이트/헥스 시각화, 맵 아트, 카메라/스크롤, 타일셋 에셋 규격을
@@ -24,36 +24,37 @@ description: >-
   기억에만 의존하지 않는다. Skia 는 SDK 버전·아키텍처에 민감하다.
 - **외과적 최소 변경**: 요청과 직결된 라인만 건드린다. 추측성 추상화·옵션·예외처리를
   새로 만들지 않는다. 인접 코드 서식을 임의로 바꾸지 않는다.
-- **웹/네이티브 분리 유지**: 기존 `GameMap.js`(네이티브) / `GameMap.web.js`(웹=null)
-  패턴을 그대로 따른다. 아래 "플랫폼 분리 결정"을 지킨다.
+- **웹/네이티브 분리 유지**: 도트 렌더러는 `PixelHexMap.js`(네이티브, Skia) / `PixelHexMap.web.js`(웹=null)
+  로 나뉜다. 아래 "플랫폼 분리 결정"을 지킨다.
 - **주석 언어**: 도메인 설명은 한국어, 라이브러리/API 설명은 영어 허용. 식별자는 영어.
 
-## 왜 "정사각 바닥 + 헥스 오버레이"인가 (이걸 먼저 이해할 것)
+## 왜 "보드 배경 + 헥스 도트 타일"인가 (이걸 먼저 이해할 것)
 
-두 격자가 공존하는 이유를 모르면 레이어를 잘못 섞는다.
+레이어 구조를 모르면 잘못 섞는다. 현재 `PixelHexMap` 은 두 레이어다.
 
-- **도트의 본질은 정사각**이다. 픽셀 아트 타일·스프라이트는 정사각(또는 직사각) 그리드에서만
-  선명하게 정렬된다. 그래서 **바닥 타일맵은 정사각 픽셀 타일**로 깐다.
-- **점령의 단위는 헥스(H3)**다. `grid.js` 가 위치를 H3 셀로 양자화하고, 점령/쿨다운/아이템
-  드랍이 전부 셀 키 기준이다(`game.js`, `items.js`). 그래서 **점령 상태만 헥스 오버레이**로
-  덮는다. 바닥을 헥스로 깔면 픽셀이 깨지고, 점령을 정사각으로 표시하면 도메인과 어긋난다.
+- **배경 = 보드**: 실제 지도는 없다. 베이지 판 + 옅은 우드 격자선을 화면에 고정으로 깐다(보드게임 톤).
+- **셀 = 헥스 도트 타일**: `grid.js` 가 위치를 H3 셀로 양자화하고, 점령/쿨다운/아이템
+  드랍이 전부 셀 키 기준이다(`game.js`, `items.js`). 화면에는 북쪽 정렬 pointy-top 육각 타일을
+  깔고 각 칸 중심을 H3 셀에 역매핑해, 칸마다 지형 스프라이트(풀숲/물가/바위/흙길)를 그린다.
+  점령 칸은 스프라이트 원본, 미개척(시야 안) 칸은 흰 wash 를 덮어 구분한다.
 
-결론: 바닥=정사각 픽셀(시각), 오버레이=헥스(도메인). 둘을 레이어로 분리해 각자의 격자를 쓴다.
+결론: 배경=보드(고정), 셀=헥스 도트 타일(H3 역매핑). 픽셀 선명도는 nearest-neighbor 로 지킨다.
 
 ## 플랫폼 분리 결정 — 네이티브만 Skia, 웹은 그대로 null
 
-walkmon 의 기존 규약은 "웹 = 상태/로그만, 네이티브 = 지도/도트"다. 이 스킬은 그 규약을
+walkmon 의 기존 규약은 "웹 = 상태/로그만, 네이티브 = 보드/도트"다. 이 스킬은 그 규약을
 **그대로 따른다**:
 
-- 새 렌더러는 `src/PixelMap.js`(네이티브, Skia) / `src/PixelMap.web.js`(웹, `return null`)로
-  플랫폼 파일을 나눈다. `GameMap.js` / `GameMap.web.js` 와 똑같은 패턴이다.
+- 도트 렌더러는 `src/PixelHexMap.js`(네이티브, Skia) / `src/PixelHexMap.web.js`(웹, `return null`)로
+  플랫폼 파일을 나눈다.
 - **이유**: react-native-skia 의 웹 동작은 CanvasKit(WASM) 로딩 + Metro/Webpack 추가 설정이
   필요하다(아래 "웹 CanvasKit" 참고). walkmon 웹은 어차피 상태 카드 + 획득 로그만 보여주면
   되므로, 웹에 Skia 를 끌어들이면 번들·설정 비용만 늘고 얻는 게 없다. 그래서 **웹은 null**.
 - 나중에 웹에서도 픽셀맵을 보여줘야 한다면 그때 CanvasKit 셋업을 추가한다. 지금은 하지 않는다.
 
-`PixelMap` 은 `GameMap` 과 **같은 props 모양**(`coords`, `gridCells`, `occupied`, `currentKey`)을
-받게 만든다. 그래야 App 쪽 호출부를 거의 안 바꾸고 갈아끼울 수 있다(최소 변경).
+`PixelHexMap` 의 props 는 `{coords, occupied, currentKey, stage, facingRight}` 다 — `gridCells` 는
+받지 않는다(렌더가 화면 격자를 자체 생성해 H3 에 역매핑). App 은 확장자 없이 `./src/PixelHexMap` 로
+import 해 번들러가 플랫폼 짝을 고른다.
 
 ## (1) 설치 + 네이티브 재빌드
 
@@ -132,7 +133,7 @@ function projectToScreen(lat, lng, center, screenW, screenH, pxPerMeter) {
 }
 ```
 
-- `pxPerMeter` 는 한 헥스(H3 res 10, 지름 약 130m)가 화면에서 보기 좋은 크기가 되도록 정한다.
+- `pxPerMeter` 는 한 헥스(H3 res 11, 지름 약 50m)가 화면에서 보기 좋은 크기가 되도록 정한다.
   예: `pxPerMeter ≈ 1.5` 면 헥스 지름이 약 195px. 줌은 이 값으로 조절한다(아래 카메라).
 - 6 꼭짓점을 각각 투영해 `Skia.Path` 로 닫힌 다각형을 만들면 헥스 한 칸이 된다(다음 절).
 
@@ -144,11 +145,11 @@ Skia 는 선언 순서대로 위에 덮어 그린다. 순서가 곧 z-index 다.
 <Canvas style={StyleSheet.absoluteFill}>
   <Group transform={[{ scale: SCALE }]}>   {/* 정수배 확대: 월드 전체 */}
 
-    {/* 1) 바닥: 정사각 픽셀 타일맵 (가장 뒤) */}
-    {/*    초기엔 절차적 타일(아래 6절), 나중에 타일셋 Image 로 교체 */}
+    {/* 1) 배경: 보드 판(베이지 + 옅은 우드 격자, 화면 고정) */}
 
-    {/* 2) 헥스 점령 오버레이: 셀별 Path + 테마색 채움 + 깃발 스프라이트 */}
-    {gridCells.map((c) => {
+    {/* 2) 헥스 셀: 셀별 Path + 지형 스프라이트/테마색 + 현재 셀 강조 */}
+    {/*    visibleCells 는 렌더가 화면 격자를 만들어 H3 에 역매핑한 목록(props 의 gridCells 아님) */}
+    {visibleCells.map((c) => {
       const path = hexPath(c.corners, center, w, h, pxPerMeter); // Skia.Path
       const occ = occupied[c.key];
       const isCurrent = c.key === currentKey;
@@ -189,7 +190,7 @@ function hexPath(corners, center, w, h, pxPerMeter) {
 ```
 
 - **테마색**: `items.js` 의 지역 테마 풀과 결을 맞춰 점령색을 정한다. 현재 셀(`currentKey`)은
-  테두리를 진하게(예: `#1d4ed8`) 줘서 GameMap 의 강조 규칙과 일관성을 유지한다.
+  테두리를 진하게(예: `#1d4ed8`) 줘서 PixelHexMap 의 현재 셀 강조 규칙과 일관성을 유지한다.
 - **깃발**: 점령 셀 중심(6 꼭짓점 평균)에 작은 깃발 스프라이트를 `<Image>` 로 얹는다.
 
 ## (5) 카메라 / 스크롤 — 플레이어 = 화면 중앙

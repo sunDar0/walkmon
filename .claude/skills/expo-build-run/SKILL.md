@@ -114,17 +114,17 @@ react-native-maps 는 **import 만 해도 웹 번들이 깨진다.** 그래서 w
 
 | 모듈/파일 | 네이티브 | 웹 |
 |---|---|---|
-| 지도 | `src/GameMap.js`(MapView + Polygon) | `src/GameMap.web.js`(`return null`) |
-| import 경로 | App.js 는 `./src/GameMap` 만 import — 번들러가 플랫폼별 짝을 고른다 | 동일 |
+| 도트 렌더 | `src/PixelHexMap.js`(react-native-skia) | `src/PixelHexMap.web.js`(`return null`) |
+| import 경로 | App.js 는 `./src/PixelHexMap` 만 import — 번들러가 플랫폼별 짝을 고른다 | 동일 |
 
 체크리스트(웹이 깨졌을 때 / 새 네이티브 모듈을 추가할 때):
 
-- [ ] 네이티브 전용 모듈(react-native-maps, 추후 react-native-skia 등)을 **직접 import 하는
+- [ ] 네이티브 전용 모듈(react-native-skia, 레거시 react-native-maps 등)을 **직접 import 하는
       파일에 `.web.js` 짝이 있는가?** 없으면 웹 번들이 깨진다.
 - [ ] `.web.js` 는 같은 props 시그니처를 받고 웹에서 안전한 것(보통 `null` 또는 상태 카드)을
       반환하는가?
-- [ ] App.js 등 공용 코드는 확장자 없이(`./src/GameMap`) import 하는가?
-      `./src/GameMap.js` 처럼 못 박으면 웹 짝이 안 골라진다.
+- [ ] App.js 등 공용 코드는 확장자 없이(`./src/PixelHexMap`) import 하는가?
+      `./src/PixelHexMap.js` 처럼 못 박으면 웹 짝이 안 골라진다.
 - [ ] 위치/격자/아이템 로직(`src/useLocation.js`, `src/grid.js`, `src/items.js`)은
       웹에서도 그대로 도는가? 이게 도는 한 웹은 지도 없이도 상태 검증용으로 충분하다.
 
@@ -132,7 +132,7 @@ react-native-maps 는 **import 만 해도 웹 번들이 깨진다.** 그래서 w
 
 ### (a) 컴파일 검증 — 웹 export 로 번들 깨짐 조기 발견
 
-런타임까지 가지 않고, 정적 번들 단계에서 웹 비호환 import(react-native-maps 직접 import 등)를
+런타임까지 가지 않고, 정적 번들 단계에서 웹 비호환 import(react-native-skia 직접 import 등)를
 잡는다. 시뮬레이터 빌드보다 빠르고, .web 분리 누락을 가장 먼저 드러낸다.
 
 ```bash
@@ -140,14 +140,14 @@ npx expo export --platform web
 ```
 
 - 성공: `dist/` 가 생성된다 → 웹 번들 정상.
-- 실패: react-native-maps 같은 모듈을 웹에서 import 했을 가능성이 크다 → §5 체크리스트로.
+- 실패: react-native-skia 같은 네이티브 전용 모듈을 웹에서 import 했을 가능성이 크다 → §5 체크리스트로.
 - 이건 **모든 변경 후 가장 먼저 돌리는 값싼 게이트**다. 네이티브 빌드 전에 먼저 통과시킨다.
 
 ### (b) 런타임 검증 — 시뮬레이터 + GPS 주입 + 핵심 루프 스크린샷
 
 핵심 루프 = **좌표 → 셀 판정 → 점령 → XP 증가**. 코드 위치:
-`useLocation`(좌표) → `cellKeyAt`/`cellsAround`(`src/grid.js`, H3 res 10 ≈ 130m) →
-`occupied` 갱신·`rollItem`(`App.js`) → `levelFromXp`/`stageFromLevel`(`src/game.js`).
+`useLocation`(좌표) → `cellKeyAt`/`cellsAround`(`src/grid.js`, H3 res 11 ≈ 50m) →
+`applyVisit`(`src/occupy.js`, stageXp 누적·`rollItem`) → `levelInStage`/`canEvolve`(`src/game.js`).
 
 시뮬레이터엔 실제 GPS 가 없으니 좌표를 주입해 루프를 돌린다.
 
@@ -161,9 +161,9 @@ adb emu geo fix 126.9780 37.5665
 ```
 
 확인 순서:
-1. 첫 좌표 주입 → 상태 카드에 `현재 지역`/`Lv.`/`XP` 가 뜨고, 네이티브에선 현재 셀
-   폴리곤이 그려지는가.
-2. 130m 이상 떨어진 다른 좌표를 주입 → 새 셀로 판정되어 **XP 가 NEW_CELL_XP 만큼 증가**하고
+1. 첫 좌표 주입 → 상태 카드에 `현재 지역`/`Lv.`/`이번 단계 XP` 가 뜨고, 네이티브에선 현재 셀
+   헥스 타일이 그려지는가.
+2. 50m 이상 떨어진 다른 좌표를 주입 → 새 셀로 판정되어 **stageXp 가 NEW_CELL_XP 만큼 증가**하고
    점령 칸 수가 늘어나는가(`Object.keys(occupied).length`).
 3. 같은 셀을 쿨다운(COOLDOWN_MS = 1시간) 전에 다시 밟으면 보상이 안 들어가는가
    (재방문 보상은 쿨다운 후에만).

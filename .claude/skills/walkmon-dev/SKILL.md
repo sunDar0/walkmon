@@ -24,8 +24,8 @@ Expo56 문서 확인이 누락되기 쉽다. 분업이 곧 안전장치다.
 
 | 에이전트 | 담당 축 | 사용 스킬 | 주요 파일 |
 |---|---|---|---|
-| game-core-engineer | 점령 로직 / H3 그리드 / 위치 추적 / 영속화 | game-mechanics, location-tracking | src/game.js, src/grid.js, src/items.js, src/useLocation.js, src/backgroundLocation.js, App.js(handleCoords·STORAGE_KEY 상태) |
-| pixel-render-engineer | 도트(픽셀) 렌더 / 헥스 오버레이 / 스프라이트 | pixel-rendering | src/GameMap.js, src/GameMap.web.js (신규 Skia 타일맵 포함) |
+| game-core-engineer | 점령 로직 / H3 그리드 / 위치 추적 / 영속화 | game-mechanics, location-tracking | src/game.js, src/grid.js, src/items.js, src/occupy.js(applyVisit·evolve·STORAGE_KEY), src/useLocation.js, src/backgroundLocation.js, App.js(handleCoords 배선) |
+| pixel-render-engineer | 도트(픽셀) 렌더 / 헥스 오버레이 / 스프라이트 | pixel-rendering | src/PixelHexMap.js, src/PixelHexMap.web.js (react-native-skia 타일맵) |
 | expo-build-qa | Expo 빌드·실행·네이티브 재빌드·시뮬 검증 | expo-build-run | app.json, package.json, app/index.tsx, App.js(배선/통합 검증용 읽기만, 게임상태 편집은 game-core-engineer) |
 
 스킬은 네 개(game-mechanics / location-tracking / pixel-rendering / expo-build-run)뿐이다.
@@ -35,8 +35,8 @@ Expo56 문서 확인이 누락되기 쉽다. 분업이 곧 안전장치다.
 
 - 코드 작성 전 Expo 56 문서(https://docs.expo.dev/versions/v56.0.0/)와 라이브러리 현행 API(Context7)를 확인하도록 각 에이전트에 지시한다. 기억에 의존하지 않는다.
 - 외과적 최소 변경: 요청과 직결된 라인만. 추측성 추상화·기능·예외처리 금지, 인접 서식 임의 변경 금지.
-- 플랫폼 분리 불변: 웹 = 상태/로그만(지도 없음), 네이티브 = 지도 + 도트. react-native-maps 와 react-native-skia 는 네이티브 전용이라 import 만 해도 웹 번들이 깨진다. 새 시각 기능은 항상 `.js`(네이티브)/`.web.js`(웹) 로 분리한다.
-- 영속화 계약: STORAGE_KEY = "walkmon_state_v1", 저장 대상은 occupied / xp / items. 상태 shape 을 바꾸면 game-core-engineer 가 SSOT 를 정하고 pixel-render-engineer 가 그 shape 을 읽기만 한다.
+- 플랫폼 분리 불변: 웹 = 상태/로그만(렌더 없음), 네이티브 = 보드 배경 + 도트. react-native-skia(및 레거시 react-native-maps)는 네이티브 전용이라 import 만 해도 웹 번들이 깨진다. 새 시각 기능은 항상 `.js`(네이티브)/`.web.js`(웹) 로 분리한다.
+- 영속화 계약: STORAGE_KEY = "walkmon_state_v3"(src/occupy.js), 저장 shape 은 { occupied, stageIndex, stageXp, items }. 상태 shape 을 바꾸면 game-core-engineer 가 SSOT 를 정하고 pixel-render-engineer 가 그 shape 을 읽기만 한다.
 
 ---
 
@@ -64,7 +64,7 @@ Expo56 문서 확인이 누락되기 쉽다. 분업이 곧 안전장치다.
 ## Phase 2 — 팀 구성 + 작업 할당
 
 1. `TeamCreate` 로 팀을 만든다. 분류된 축에 해당하는 에이전트만 부른다(빌드 검증은 거의 항상 포함).
-2. 각 에이전트를 `Agent` 로 부를 때 반드시 `model: "opus"` 를 명시한다. 세 에이전트 모두 opus 다.
+2. 각 에이전트를 `Agent` 로 부를 때 `model` 을 그 에이전트 정의(frontmatter)의 tier 에 맞춰 명시한다. 현재 세 에이전트는 모두 코드 생성(game-core·pixel-render) 또는 QA(expo-build-qa)라 `opus` 다. 뒤에 기계적 IO 전용 에이전트(로그 수집·포맷 변환·배포 스크립트 실행 등)를 붙이면 그것만 `sonnet` 으로 둔다.
    - game-core-engineer (.claude/agents/game-core-engineer.md)
    - pixel-render-engineer (.claude/agents/pixel-render-engineer.md)
    - expo-build-qa (.claude/agents/expo-build-qa.md)
@@ -119,7 +119,7 @@ Expo56 문서 확인이 누락되기 쉽다. 분업이 곧 안전장치다.
 3. Phase 2: TeamCreate → game-core-engineer·pixel-render-engineer·expo-build-qa 를 각각 model:"opus" 로 Agent 호출. TaskCreate 의존성: 렌더 → 로직, 검증 → 렌더+로직.
 4. Phase 3:
    - game-core-engineer 가 game-mechanics 스킬로 점령 상태 shape(occupied 의 셀 키 집합 + 색 결정 규칙)을 확정해 `p2_game-core-engineer_state-shape.md` 저장.
-   - pixel-render-engineer 가 SendMessage 로 shape 을 확인하고, pixel-rendering 스킬로 src/GameMap.js 에 헥스(H3 corners) 위 픽셀 색칠 오버레이를 만들어 `p3_pixel-render-engineer_hex-overlay.md` 저장. src/GameMap.web.js 는 null 유지(웹 분리).
+   - pixel-render-engineer 가 SendMessage 로 shape 을 확인하고, pixel-rendering 스킬로 src/PixelHexMap.js 에 헥스(H3 역매핑) 위 픽셀 색칠 오버레이를 만들어 `p3_pixel-render-engineer_hex-overlay.md` 저장. src/PixelHexMap.web.js 는 null 유지(웹 분리).
 5. Phase 4: expo-build-qa 가 expo-build-run 스킬로 시뮬레이터에서 점령 시 해당 헥스가 도트로 칠해지는지 확인, `p4_expo-build-qa_verify-report.md` 작성.
 6. Phase 5: 바뀐 파일·검증 결과 종합 보고.
 

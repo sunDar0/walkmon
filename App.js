@@ -1,31 +1,26 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { StyleSheet, View, Text, ScrollView, AppState } from 'react-native';
+import { StyleSheet, View, Text, ScrollView, AppState, Pressable } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import PixelHexMap from './src/PixelHexMap';
 
 import { useLocation } from './src/useLocation';
-import { cellKeyAt, cellsAround } from './src/grid';
+import { cellKeyAt } from './src/grid';
 import { cellTheme } from './src/items';
-import { levelFromXp, stageFromLevel } from './src/game';
-import { STORAGE_KEY, INITIAL_STATE, applyVisit } from './src/occupy';
+import { STAGES, STAGE_MAX_LEVEL, levelInStage, canEvolve } from './src/game';
+import { STORAGE_KEY, INITIAL_STATE, applyVisit, evolve } from './src/occupy';
 import { registerBackgroundLocation } from './src/backgroundLocation';
-
-// 시야 반경(H3 ring). 내 위치 중심 약 3칸까지 미개척 그리드를 보여준다.
-const VISION_RING = 3;
 
 export default function App() {
   const [coords, setCoords] = useState(null);
   const [currentKey, setCurrentKey] = useState(null);
-  // 게임 상태 단일 진실원. occupied/xp/items 를 한 객체로 묶어 포그라운드·백그라운드가 같은 shape 을 쓴다.
+  // 게임 상태 단일 진실원. occupied/stageIndex/stageXp/items 를 한 객체로 묶어 포그라운드·백그라운드가 같은 shape 을 쓴다.
   const [gameState, setGameState] = useState(INITIAL_STATE);
-  const [gridCells, setGridCells] = useState([]);
   // 펫이 바라보는 방향. false = 왼쪽 보기(스프라이트 기본), true = 오른쪽(동쪽 이동 시 반전).
   const [facingRight, setFacingRight] = useState(false);
 
   const loaded = useRef(false);
-  const lastGridKey = useRef(null);
   const lastCoordsRef = useRef(null); // 직전 좌표(이동 방향 판정용)
 
   // 저장소에서 게임 상태를 읽어온다. 구버전/누락 필드는 INITIAL_STATE 로 메워 하위호환.
@@ -82,27 +77,23 @@ export default function App() {
     }
     lastCoordsRef.current = c;
 
-    // 셀이 바뀔 때만 그리드 다시 계산(불필요한 재계산 방지)
-    if (key !== lastGridKey.current) {
-      lastGridKey.current = key;
-      setGridCells(cellsAround(c.latitude, c.longitude, undefined, VISION_RING));
-    }
-
     // 함수형 업데이트로 stale 방지. 보상이 없으면 applyVisit 가 같은 참조를 돌려줘 리렌더가 생략된다.
     setGameState((prev) => applyVisit(prev, c, Date.now()).state);
   }, []);
 
   const status = useLocation(handleCoords);
 
-  const level = levelFromXp(gameState.xp);
-  const stage = stageFromLevel(level);
+  const stageIndex = gameState.stageIndex;
+  const stage = STAGES[stageIndex];
+  const level = levelInStage(gameState.stageXp, stageIndex);
+  const maxLevel = STAGE_MAX_LEVEL[stageIndex];
+  const evolvable = canEvolve(gameState.stageXp, stageIndex);
 
   return (
     // GestureHandlerRootView 가 앱 루트에 있어야 PixelHexMap 내부의 GestureDetector(핀치 줌)가 동작한다.
     <GestureHandlerRootView style={styles.container}>
       <PixelHexMap
         coords={coords}
-        gridCells={gridCells}
         occupied={gameState.occupied}
         currentKey={currentKey}
         stage={stage}
@@ -112,10 +103,10 @@ export default function App() {
       <View style={styles.card}>
         <Text style={styles.title}>나의 다마고치</Text>
         <Text style={styles.stage}>
-          {stage} · Lv.{level}
+          {stage} · Lv.{level} / {maxLevel}
         </Text>
         <Text style={styles.sub}>
-          XP {gameState.xp} · 점령 {Object.keys(gameState.occupied).length}칸
+          이번 단계 XP {gameState.stageXp} · 점령 {Object.keys(gameState.occupied).length}칸
         </Text>
         <Text style={styles.sub}>
           현재 지역: {currentKey ? cellTheme(currentKey) : '위치 확인 중...'}
@@ -123,19 +114,30 @@ export default function App() {
         {status !== 'tracking' && (
           <Text style={styles.warn}>위치 상태: {status}</Text>
         )}
+        {evolvable && (
+          <Pressable
+            style={styles.evolveBtn}
+            onPress={() => setGameState((prev) => evolve(prev))}
+          >
+            <Text style={styles.evolveBtnText}>✦ 진화하기</Text>
+          </Pressable>
+        )}
       </View>
 
-      <View style={styles.log}>
-        <Text style={styles.logTitle}>최근 획득</Text>
-        <ScrollView>
-          {gameState.items.length === 0 && <Text style={styles.dim}>아직 없음</Text>}
-          {gameState.items.map((it, i) => (
-            <Text key={i} style={styles.logItem}>
-              {it.item}
-            </Text>
-          ))}
-        </ScrollView>
-      </View>
+      {/* 최근 획득 로그: 디버그 중 임시 숨김. 다시 보려면 false -> true. */}
+      {false && (
+        <View style={styles.log}>
+          <Text style={styles.logTitle}>최근 획득</Text>
+          <ScrollView>
+            {gameState.items.length === 0 && <Text style={styles.dim}>아직 없음</Text>}
+            {gameState.items.map((it, i) => (
+              <Text key={i} style={styles.logItem}>
+                {it.item}
+              </Text>
+            ))}
+          </ScrollView>
+        </View>
+      )}
     </GestureHandlerRootView>
   );
 }
@@ -159,6 +161,14 @@ const styles = StyleSheet.create({
   stage: { fontSize: 22, fontWeight: '700', color: '#111827' },
   sub: { fontSize: 13, color: '#374151', marginTop: 2 },
   warn: { fontSize: 12, color: '#b91c1c', marginTop: 6 },
+  evolveBtn: {
+    marginTop: 12,
+    backgroundColor: '#7c3aed',
+    borderRadius: 10,
+    paddingVertical: 10,
+    alignItems: 'center',
+  },
+  evolveBtnText: { fontSize: 15, fontWeight: '700', color: '#ffffff' },
   log: {
     position: 'absolute',
     bottom: 32,

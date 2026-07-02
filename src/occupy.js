@@ -10,12 +10,17 @@ import {
   REVISIT_XP,
   NEW_CELL_POINTS,
   REVISIT_POINTS,
+  STAGE_MAX_LEVEL,
+  XP_PER_LEVEL,
+  canEvolve,
 } from './game';
 
-export const STORAGE_KEY = 'walkmon_state_v1';
+// 성장 상태 shape 변경(xp → stageIndex/stageXp)으로 옛 저장본은 호환 안 됨.
+// 키 버전을 v3 로 올려 기존 저장분을 자연히 무시(빈 상태로 시작=초기화)한다.
+export const STORAGE_KEY = 'walkmon_state_v3';
 
 // 저장본이 없거나 깨졌을 때의 기본 상태.
-export const INITIAL_STATE = { occupied: {}, xp: 0, items: [] };
+export const INITIAL_STATE = { occupied: {}, stageIndex: 0, stageXp: 0, items: [] };
 
 // 좌표 한 건을 받아 점령/보상을 판정한다. 기존 App.js handleCoords 와 결과가 동치다.
 // 반환: { state, changed, currentKey }
@@ -32,7 +37,8 @@ export function applyVisit(state, coords, now) {
     return { state, changed: false, currentKey: key };
   }
 
-  const xp = state.xp + (isNew ? NEW_CELL_XP : REVISIT_XP);
+  // XP 는 이제 현재 단계 누적(stageXp)에 쌓인다. stageIndex 는 여기서 건드리지 않는다(진화는 evolve 전용).
+  const stageXp = state.stageXp + (isNew ? NEW_CELL_XP : REVISIT_XP);
 
   const item = rollItem(key);
   const items = item
@@ -48,8 +54,19 @@ export function applyVisit(state, coords, now) {
   };
 
   return {
-    state: { occupied, xp, items },
+    state: { occupied, stageIndex: state.stageIndex, stageXp, items },
     changed: true,
     currentKey: key,
+  };
+}
+
+// 수동 진화(순수 함수). canEvolve 면 다음 단계로 올리고, 옛 단계 만렙만큼의 XP 를 차감해 초과분을 이월한다.
+// 진화 불가면 입력 state 를 그대로 돌려준다. React 비의존 — 포그라운드·백그라운드 공유 규약.
+export function evolve(state) {
+  if (!canEvolve(state.stageXp, state.stageIndex)) return state;
+  return {
+    ...state,
+    stageIndex: state.stageIndex + 1,
+    stageXp: state.stageXp - STAGE_MAX_LEVEL[state.stageIndex] * XP_PER_LEVEL,
   };
 }

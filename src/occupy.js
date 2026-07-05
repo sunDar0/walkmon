@@ -20,7 +20,15 @@ import {
 export const STORAGE_KEY = 'walkmon_state_v3';
 
 // 저장본이 없거나 깨졌을 때의 기본 상태.
-export const INITIAL_STATE = { occupied: {}, stageIndex: 0, stageXp: 0, items: [] };
+// petType(0~3, 0=불/1=물/2=땅/3=풀)은 외형 전용 — XP·점령·쿨다운·진화 규칙에 영향 없음.
+// 옛 저장본(petType 없음)은 App.js 로드의 { ...INITIAL_STATE, ...저장본 } 병합으로 0 이 자동 채워진다.
+export const INITIAL_STATE = { occupied: {}, stageIndex: 0, stageXp: 0, items: [], petType: 0 };
+
+// 새 게임(초기화) 순수 함수. 진행 상태를 전부 비우고 선택한 속성으로 알 단계(Lv.0)에서 시작한다.
+// reveal 집합 같은 세션 시야 상태는 이 함수 밖(App.js)에서 함께 리셋한다.
+export function newGame(petType) {
+  return { occupied: {}, stageIndex: 0, stageXp: 0, items: [], petType };
+}
 
 // 좌표 한 건을 받아 점령/보상을 판정한다. 기존 App.js handleCoords 와 결과가 동치다.
 // 반환: { state, changed, currentKey }
@@ -54,7 +62,8 @@ export function applyVisit(state, coords, now) {
   };
 
   return {
-    state: { occupied, stageIndex: state.stageIndex, stageXp, items },
+    // petType 은 외형 전용이라 방문/보상에서 변하지 않는다. 새 state 객체에도 그대로 실어 유실을 막는다.
+    state: { occupied, stageIndex: state.stageIndex, stageXp, items, petType: state.petType },
     changed: true,
     currentKey: key,
   };

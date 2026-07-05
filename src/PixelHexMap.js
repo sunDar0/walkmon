@@ -5,13 +5,14 @@ import {
   FilterMode,
   Group,
   MipmapMode,
+  PaintStyle,
   Path,
   Picture,
   Skia,
   useClock,
   useImage,
 } from "@shopify/react-native-skia";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Pressable,
   StyleSheet,
@@ -49,7 +50,8 @@ const PX_PER_M = 1.28;
 //   - 최대 줌인(ZOOM_MAX)   = 화면 ~205m  -> zoom = W/PX_PER_M/205.  같은 기준서 ≈ 1.5(유지).
 // 표준폰 기준 상수로 고정한다(기기 폭에 따라 실제 커버 km 가 ±10% 안팎으로 흔들리나 무시 가능).
 // 50m 헥스 화면폭 = HEX_W×zoom(= 50m×W/실제폭, split 무관): ZOOM_MIN서 64×0.2 ≈ 13px(작지만 도트 구분됨),
-// ZOOM_MAX서 64×1.5 = 96px(시원하게 큼). 기본 줌(초기 0.5)은 화면 ~600m·헥스 32px 중간 뷰.
+// ZOOM_MAX서 64×1.5 = 96px(시원하게 큼). 최초/기본 줌은 이 범위 안에서 initialZoomForRing(W,H) 로 계산한다
+// (2링 19칸 fit, iPhone 17 Pro 기준 ≈ 1.07). ZOOM_MAX 고정이 아니라서 최초 상태에서도 핀치 줌인 여유가 있다.
 // 13px 이 작다 싶으면 최대 줌아웃을 1km 로 좁힌다(ZOOM_MIN=0.307 -> 헥스 ~20px). 사용자 판단.
 const ZOOM_MIN = 0.2;
 const ZOOM_MAX = 1.5;
@@ -66,22 +68,47 @@ const REBAKE_DIST = 200;
 // 줌아웃/카메라 이동에도 빈틈(검은 void)이 없다. 옅은 격자 패턴이 이 위에 얹혀 "보드판" 질감을 준다.
 const BG_COLOR = "#e7e1cf";
 
-// --- 보드 게임 판 격자 패턴 ---
-// 실제 지도 타일(Voyager/OSM)을 걷어내고, 판 위 옅은 격자선으로 "보드 게임판" 느낌을 준다.
-// 패턴은 월드(worldTransform) 안에 베이크되어 걸으면(카메라 이동) 함께 흐르고, 줌/드래그에도
-// 격자·펫과 같은 변환을 거친다 -> "판 위를 걷는" 정합. 화면 고정은 단색 BG_COLOR 뿐이다.
-// 저대비 warm brown 선이라 헥스 도트를 방해하지 않는다(은은하게, 과하지 않게).
-const BOARD_TILE_PX = 64; // 판 격자 한 칸(bake space px). 화면 칸 = BOARD_TILE_PX×zoom.
-const BOARD_LINE_PX = 2; // 격자선 두께(bake space px). zoom 스케일되어 줌아웃 시 옅게 사라진다.
-const BOARD_LINE_COLOR = "rgba(120, 90, 55, 0.08)"; // 옅은 우드 브라운 격자선(저대비)
+// --- 보드 게임 판 육각 격자 패턴 ---
+// 실제 지도 타일(Voyager/OSM)을 걷어내고, 판 위 옅은 "육각 윤곽"으로 "보드 게임판" 느낌을 준다.
+// 정사각 격자였던 것을 게임 타일과 같은 pointy-top 육각으로 바꿔, buildLattice 와 동일한 기하(colStep/rowStep/
+// 홀수행 오프셋/원점)에 straightHexPath stroke 만 그린다 -> 빈 판의 옅은 육각과 드러난 타일 육각이 1:1 정렬된다.
+// 패턴은 월드(worldTransform) 안에 베이크되어 걸으면(카메라 이동) 함께 흐르고, 줌/드래그에도 격자·펫과 같은
+// 변환을 거친다 -> "판 위를 걷는" 정합. 화면 고정은 단색 BG_COLOR 뿐이다. 저대비 warm brown 윤곽이라 도트를 안 가린다.
+const BOARD_LINE_PX = 2; // 육각 윤곽 두께(bake space px). zoom 스케일되어 줌아웃 시 옅게 사라진다.
+const BOARD_LINE_COLOR = "rgba(120, 90, 55, 0.08)"; // 옅은 우드 브라운 윤곽선(저대비)
 
-// --- 시야 원 ---
-// 미점령 프런티어를 펫 주변 몇 링까지 미리 보여줄지 정하는 렌더 전용 반경(점령 칸은 반경과 무관하게 항상 그림).
-// 반지름 = VISION_RING * 셀간격 * PX_PER_M. 화면 격자 설계 칸(=50m, res11)에 맞춰 셀 간격 50m 로 둔다.
-// 8 * 50 * 1.28 = 512px(bake 공간) -> 8 칸(~400m) 반경. worldGroup zoom 으로 화면에선 함께 스케일.
-const VISION_RING = 8;
-const CELL_SPACING_M = 50;
-const VISION_RADIUS_PX = Math.round(VISION_RING * CELL_SPACING_M * PX_PER_M);
+// --- reveal 낙하 등장 애니메이션 (game-core 계약 p15) ---
+// 렌더 대상 = reveal `cells`(revealedCells.has(key) 멤버십). 이번 스텝 신규 = `newly`(newlyRevealed, 낙하 대상).
+// 기존 VISION_RING(원형 시야 ~400m) 렌더는 폐기 — reveal 멤버십으로 "그릴지"를 판정한다(점령 여부는 스타일만).
+// 신규 칸은 "화면 위 경계 바깥"에서 시작해 ease-out-bounce 로 낙하해 안착한다(화면 안에서 대기/시작하지 않게).
+// 시작 높이는 고정값이 아니라 뷰포트를 확실히 벗어나도록 런타임에 (H + 여유)/zoom bake px 로 계산한다
+//   (bake translateY × zoom = 화면 lift = H+여유 -> 화면 y ≤ H 인 어떤 칸도 위로 벗어남, zoom 무관 상수).
+// clock(useClock) 기반 UI 스레드 구동(React 리렌더 없음). 낙하 종료 후엔 정적 bake 로 흡수(JS 타이머).
+const DROP_MARGIN = 80; // px, 화면 위 경계 밖으로 확실히 나가게 하는 여유(화면 px 기준). 낙하/캐릭터 공용.
+const DROP_DURATION = 920; // ms, 낙하 1회(가속 낙하 + 세틀 바운스). 시작높이를 화면 높이로 키운 만큼 늘려 속도 완화.
+const DROP_STAGGER_SPAN = 200; // ms, 칸키 해시로 흩뿌리는 최대 시작 지연(이동 reveal 칸이 한꺼번에 안 떨어지게)
+
+// --- 앱 최초 기동 인트로 연출 ---
+// 최초/리셋 후 첫 reveal(19칸)은 "뚝뚝 순차"로 낙하한 뒤, 그리드가 전부 안착하면 캐릭터(펫)가 마지막에 낙하.
+// 순차 지연은 칸키 해시(hashKey) 정렬 rank × STEP 로 만든다(무작위 순서·거리순 아님, 결정적 -> Math.random 회피).
+const INTRO_STAGGER_STEP = 110; // ms, 인트로 칸당 순차 간격(뚝뚝 떨어지는 리듬)
+// 캐릭터 낙하 시작 높이도 화면 밖 보장: (petBase.y + DROP_MARGIN)/zoom bake px 로 런타임 계산(petTransform 참고).
+const PET_DROP_DURATION = 900; // ms, 캐릭터 낙하 1회(가속 낙하 + 세틀 바운스). 그리드 낙하와 같은 결로 완만하게.
+
+// easeDropSettle: 0->1 진행도("하늘에서 자연스럽게 떨어져 사뿐히 안착"). translateY = -dropHeight*(1-e) 로 쓰인다.
+// 이전 easeOutBounce 는 시작부터 급강하(t=0 미분 큼)라 큰 낙하거리와 겹쳐 "총알처럼 꽂히는" 느낌이었다.
+// 대신 [0,tf] 는 ease-in-quad(중력 낙하: 처음 느리게 가속) → [tf,1] 은 착지 후 한 번 살짝 튀고 잦아드는 세틀.
+// worklet 로 표시해 useDerivedValue 안에서 호출.
+function easeDropSettle(t) {
+  "worklet";
+  const tf = 0.8; // 바닥 첫 접촉 시점(80% 낙하 / 20% 세틀 바운스)
+  if (t < tf) {
+    const x = t / tf;
+    return x * x; // ease-in quad: 완만히 가속해 낙하(시작 급강하 없음)
+  }
+  const x = (t - tf) / (1 - tf); // 0..1 세틀 구간
+  return 1 - Math.sin(x * Math.PI) * 0.06 * (1 - x); // 착지서 한 번 살짝(≤6%) 튀고 잦아들어 안착
+}
 
 // 테마(items.js cellTheme) -> 픽셀 팔레트.
 // dim = 미점령(아주 옅은 안개, 지도가 비치게), lit = 점령(반투명으로 지도 위 "불이 켜진다"), border = 점령 보더.
@@ -131,15 +158,15 @@ const TILE_TYPE_BY_ROW = [
 
 // --- 펫(다마고치) 크리처 아틀라스(monster_packed.png) ---
 // 도트 헥스 월드 중앙(플레이어 자리)에 성장 단계별 크리처를 그린다.
-// 4줄 = 속성 타입: 0=불(빨강), 1=물(파랑), 2=땅(갈색), 3=풀(초록).
+// 4줄 = 속성 타입: 0=불(빨강), 1=물(파랑), 2=땅(갈색), 3=바람(초록 스프라이트는 임시 placeholder).
 // 6열: col0=속성아이콘, col1=알, col2=유년, col3=소년, col4=청년, col5=성년기(왼->오 점점 큼).
 const PET_ATLAS_SRC = require("../assets/pet/monster_packed.png");
 const PET_FRAMES = require("../assets/pet/monster_coordinate.json").frames;
 const PET_FRAMES_BY_NAME = {};
 for (const f of PET_FRAMES) PET_FRAMES_BY_NAME[f.name] = f;
 
-// 기본 펫 속성 = 0(불). 물=1·땅=2·풀=3 으로 바꾸려면 이 한 줄만 수정한다.
-const PET_TYPE_ROW = 0;
+// 펫 속성(아틀라스 row)은 App.js 가 넘기는 petType prop(0=불/1=물/2=땅/3=바람)으로 결정한다.
+// 프레임 이름은 `sprite_${petType}_${col}` 로 조립(petPicture 참고). 미전달 시 0(불) 폴백.
 // 게임 성장 단계(stageFromLevel 반환 문자열) -> 아틀라스 열. 알->col1 ... 성년->col5.
 // stage 가 바뀌면 자동으로 다른 프레임이 골라져 진화가 화면에 보인다.
 const PET_STAGE_COL = { 알: 1, 유년: 2, 소년: 3, 청년: 4, 성년: 5 };
@@ -148,9 +175,8 @@ const PET_STAGE_COL = { 알: 1, 유년: 2, 소년: 3, 청년: 4, 성년: 5 };
 // res11 전환에도 HEX_W(64)를 유지했으므로 이 비율은 그대로 -> 펫이 자동으로 50m 칸에 비례(PET_SCALE 재조정 불필요).
 // 더 낮게 깔고 싶으면 이 값만 낮춘다(예: 52 -> 펫 ≈ 0.8칸). 사용자 판단.
 // 모든 단계에 같은 배율 -> 단계가 작을수록 원본이 작아 자연히 작게 그려진다(성장감).
+// 스케일은 petType(row)마다 col5 원본 높이가 다를 수 있어 petPicture 안에서 row 별로 계산한다.
 const PET_TARGET_MAX_H = 68;
-const PET_MAX_FRAME = PET_FRAMES_BY_NAME[`sprite_${PET_TYPE_ROW}_5`];
-const PET_SCALE = PET_TARGET_MAX_H / PET_MAX_FRAME.h; // ≈ 0.35
 
 // --- 펫 미세 모션(이동 hop + idle 숨쉬기) ---
 // 프레임 시트 없이 정적 스프라이트 한 장을 transform 만으로 살아 움직이게 한다.
@@ -204,6 +230,25 @@ const TILE_HEX_H = Math.round((TILE_DRAW_W * 2) / Math.sqrt(3));
 // 행(상하) 간격 배수. 1.0 = 정육각 완전 맞물림(상하 겹침 많아 타이트). 키우면 위아래로 벌어진다.
 // 좌우 간격은 SPRITE_OVERLAP, 상하 간격은 이 값으로 따로 조절한다.
 const ROW_SPACING = 1.02;
+
+// --- 초기 표시 줌 (fit-to-ring) ---
+// 최초 기동/초기화 직후 reveal 은 정확히 2링(gridDisk k=2) 19칸이다. 이 hex disk 가 화면에 여백을 두고
+// 다 들어오도록 초기/기본 줌을 화면 크기(W/H)·격자 기하로 계산한다(매직넘버 회피, 기기 폭이 달라도 성립).
+// 이후 핀치 줌은 자유(초기 줌만 조정). 2링 disk 의 bake-space extent(pointy-top, 셀=HEX_W×HEX_H):
+//   가로 = 5칸(2·k+1)×HEX_W, 세로 = 4행(2·k)×rowStep + HEX_H.  (rowStep = HEX_H·0.75·ROW_SPACING ≈ 57)
+// 화면 표시 크기 = extent×zoom 이므로 zoom = 화면가용/extent. 가로·세로 중 작은 값으로 맞춰 양방향 다 넣는다.
+// 예) iPhone 17 Pro(W≈402): zoom ≈ 402×0.85/(5×64) ≈ 1.07 (가로가 제약, ZOOM_MAX 1.5 아래 -> 핀치 줌인 여유).
+const RING_FIT_MARGIN = 0.85; // 화면의 85%만 쓰고 15% 여백(2링이 화면 가장자리에 붙지 않게)
+function initialZoomForRing(W, H) {
+  const rowStep = HEX_H * 0.75 * ROW_SPACING;
+  const ringWpx = 5 * HEX_W; // 가로 extent(bake px) = (2·2+1)칸
+  const ringHpx = 4 * rowStep + HEX_H; // 세로 extent(bake px) = (2·2)행 + 한 칸 높이
+  const fit = Math.min(
+    (W * RING_FIT_MARGIN) / ringWpx,
+    (H * RING_FIT_MARGIN) / ringHpx,
+  );
+  return Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, fit)); // [ZOOM_MIN, ZOOM_MAX] 클램프
+}
 
 // 베이크 캔버스에 셀 스프라이트 한 칸을 (cx,cy) 중심으로 그린다.
 // alpha=1 = 점령(또렷, 불 켜짐), alpha<1 = 프런티어(옅은 안개).
@@ -323,12 +368,78 @@ function buildLattice(W, H) {
   return cells;
 }
 
+// --- 격자 2링 -> H3 키(reveal SSOT 를 격자 기하에 맞춤) ---
+// 문제: reveal 을 H3 gridDisk 로 잡으면(App.js 기존), H3 육각이 화면 똑바른 격자와 ~14° 기울어 안 맞물려
+// 화면 2링 격자 19칸 중 gridDisk-19 에 걸리는 게 ~13칸뿐 -> 화면에 13칸만 그려진다(사용자 지적).
+// 해법: reveal 을 "화면 격자 disk 칸들의 cellKeyAt(H3)" 로 정의한다. 렌더는 각 격자 칸을 cellKeyAt 로 키를 얻어
+// revealed.has(key) 로 판정하므로, revealed 가 곧 격자 칸들의 키면 그 격자 칸이 자기 키로 100% 매칭 -> 정확히 19칸.
+// buildLattice 와 동일한 colStep/rowStep/홀수행 오프셋을 써 렌더 격자와 1:1 정합해야 한다(값이 어긋나면 매칭 깨짐).
+// App.js(reveal SSOT)가 diskKeys(H3 gridDisk) 대신 이 헬퍼를 쓰도록 계약 변경 필요(export). 화면(W/H) 무관 —
+// 중심 상대 오프셋(dx,dy)만 쓰고 screenToLatLng 의 W/2·H/2 가 상쇄되므로 순수 위경도 기하로 계산한다.
+// odd-r pointy-top 큐브 거리로 정확히 (1+6+12)=19칸(rings=2)을 고른다.
+function hexDistanceOddR(col, row) {
+  // odd-r(홀수 행 오른쪽 밀림 = buildLattice 의 r&1?+colStep/2) -> 큐브 좌표 변환 후 맨해튼/2 = 육각 거리.
+  const x = col - (row - (row & 1)) / 2;
+  const z = row;
+  const y = -x - z;
+  return (Math.abs(x) + Math.abs(y) + Math.abs(z)) / 2;
+}
+export function latticeDiskKeys(centerLat, centerLng, rings = 2) {
+  const colStep = HEX_W;
+  const rowStep = Math.round(HEX_H * 0.75 * ROW_SPACING); // buildLattice 와 동일해야 렌더 격자와 정합
+  const mPerDegLng = M_PER_DEG_LAT * Math.cos((centerLat * Math.PI) / 180);
+  const seen = new Set();
+  const keys = [];
+  for (let r = -rings; r <= rings; r++) {
+    for (let c = -rings - 1; c <= rings + 1; c++) {
+      if (hexDistanceOddR(c, r) > rings) continue;
+      // 중심 상대 오프셋(bake px) -> 위경도(screenToLatLng 의 dx=x-W/2, dy=y-H/2 와 동일, W/H 상쇄).
+      const dx = c * colStep + (r & 1 ? colStep / 2 : 0);
+      const dy = r * rowStep;
+      const lat = centerLat + -dy / PX_PER_M / M_PER_DEG_LAT;
+      const lng = centerLng + dx / PX_PER_M / mPerDegLng;
+      const key = cellKeyAt(lat, lng);
+      if (seen.has(key)) continue; // 두 격자 칸이 같은 H3 로 접히면 중복 제거(그래도 두 칸 다 그려짐)
+      seen.add(key);
+      keys.push(key);
+    }
+  }
+  return keys;
+}
+
+// revealedCells prop 미전달 방어용 빈 Set(모듈 1개 공유 -> 매 렌더 새 Set 안 만듦).
+const EMPTY_REVEAL = new Set();
+
+// 낙하 중인 신규 reveal 칸 1개(= H3 키 하나에 대응하는 lattice 칸들의 미니 Picture)를 그린다.
+// 목표 위치의 정적 bake 좌표 그대로 그린 picture 를 <Group translateY> 로 위(-dropHeight)에서 아래로 떨군다.
+// dropHeight(bake px) = (H + DROP_MARGIN)/zoom -> 화면 위 밖에서 시작(대기 중에도 화면 안에 안 보임).
+// clock(UI 스레드 SharedValue) 기반이라 React 리렌더 없이 매 프레임 평가된다(펫 hop 과 동일 결).
+// startMs = 배치 시작 clock 값, delay = 칸키 해시 stagger. 월드 Group(카메라+줌/팬) 안에 놓여 정합은 자동.
+function FallingCell({ picture, clock, startMs, delay, dropHeight }) {
+  const transform = useDerivedValue(() => {
+    const t = Math.min(
+      1,
+      Math.max(0, (clock.value - startMs - delay) / DROP_DURATION),
+    );
+    const e = easeDropSettle(t); // 0(시작, 위) -> 1(안착, 정위치)
+    return [{ translateY: -dropHeight * (1 - e) }];
+  }, [startMs, delay, dropHeight]);
+  return (
+    <Group transform={transform}>
+      <Picture picture={picture} />
+    </Group>
+  );
+}
+
 export default function PixelHexMap({
   coords,
   occupied,
   currentKey,
   stage,
   facingRight,
+  petType = 0,
+  revealedCells,
+  newlyRevealed,
 }) {
   const { width: W, height: H } = useWindowDimensions();
 
@@ -338,9 +449,11 @@ export default function PixelHexMap({
   // 콜백은 기본적으로 UI 스레드 worklet 으로 표시된다. 그 안에서 React setter(setZoom)나 ref 변이를
   // 직접 호출하려면 .runOnJS(true) 로 콜백을 JS 스레드에서 돌려야 한다(없으면 첫 핀치에서 크래시).
   // zoom 은 project() 의존성이 아니라 베이크/투영을 다시 돌리지 않는다(아래 useMemo deps 에 zoom 없음).
-  const [zoom, setZoom] = useState(0.5); // 초기 ~600m·헥스 32px 중간 뷰(시야원 300m 여유 있게 보임)
-  const zoomRef = useRef(0.5); // 라이브 zoom(onEnd 에서 baseline 으로 커밋)
-  const baseZoomRef = useRef(0.5); // 직전 제스처 종료 시점의 배율(다음 핀치의 기준)
+  // 최초/기본 줌 = 2링(19칸) fit(initialZoomForRing). ZOOM_MAX 고정이 아니라 화면에 맞춰 계산 -> 핀치 줌인 여유.
+  const initialZoom = initialZoomForRing(W, H);
+  const [zoom, setZoom] = useState(initialZoom);
+  const zoomRef = useRef(initialZoom); // 라이브 zoom(onEnd 에서 baseline 으로 커밋)
+  const baseZoomRef = useRef(initialZoom); // 직전 제스처 종료 시점의 배율(다음 핀치의 기준)
   const pinchGesture = useMemo(
     () =>
       Gesture.Pinch()
@@ -379,6 +492,21 @@ export default function PixelHexMap({
   // 화면중앙"으로 베이크해, 카메라보다 앞선 플레이어가 격자 위를 이동하게 한다(1단계는 coords 앵커라
   // 플레이어가 항상 중앙칸 -> 격자 위 이동이 0이었다). null = 첫 좌표 전.
   const [bakeAnchor, setBakeAnchor] = useState(null);
+
+  // --- reveal 낙하 배치 상태 ---
+  // fallingBatches: 아직 낙하 중인 배치들 [{ id, keys: string[], startMs }]. newlyRevealed 스텝마다 하나 추가,
+  // DROP 완료 후 제거되면 그 칸들이 정적 bake 로 흡수된다(재낙하 방지). batchIdRef = 배치 식별 카운터.
+  const [fallingBatches, setFallingBatches] = useState([]);
+  const batchIdRef = useRef(0);
+
+  // --- 인트로 캐릭터 낙하 상태 ---
+  // petDropStartMs: 캐릭터 낙하 시작 clock 값(그리드 전부 안착 후 트리거). 초기 큰 음수 = 낙하 안 함.
+  // introPetPending: 인트로 그리드 낙하 "진행 중"에만 펫을 숨긴다(그리드 안착 뒤 낙하로 등장). 초기 false =
+  //   기본은 펫 표시. 인트로 낙하가 실제 시작될 때만 true 로 올리고(아래 effect), 그리드 안착 시각 기반
+  //   setTimeout 이 반드시 false 로 되돌린다(p17 cleanup 제거로 자기완결). 인트로가 안 뜨면 계속 false 라
+  //   펫이 영구 차단되지 않는다(초기 true 였을 때 인트로 미발동 시 펫이 영영 안 그려지던 버그 수정).
+  const petDropStartMs = useSharedValue(-1e9);
+  const [introPetPending, setIntroPetPending] = useState(false);
   const panGesture = useMemo(
     () =>
       Gesture.Pan()
@@ -411,12 +539,16 @@ export default function PixelHexMap({
     [pinchGesture, panGesture],
   );
 
-  // "내 위치 찾기": 자유 둘러보기 -> 플레이어 추적 모드 복귀. 팬 리셋 + 모드 전환.
+  // "내 위치 찾기": 자유 둘러보기 -> 플레이어 추적 모드 복귀. 팬 리셋 + 줌 1.0 + 모드 전환.
   // 카메라를 플레이어로 되돌리는 withTiming 은 아래 follow effect 가 mode 변경을 받아 처리한다.
+  // 줌은 요청대로 1.00 으로 스냅(상태·refs 를 함께 맞춰 다음 핀치 기준도 1.0).
   const recenter = () => {
     basePanRef.current = { x: 0, y: 0 };
     panX.value = 0;
     panY.value = 0;
+    setZoom(1);
+    zoomRef.current = 1;
+    baseZoomRef.current = 1;
     setMode("player");
   };
 
@@ -430,9 +562,10 @@ export default function PixelHexMap({
   // 화면 고정 똑바른 육각 격자(좌표 무관 순수 기하). W/H 로만 메모(줌은 worldGroup 이 처리).
   const lattice = useMemo(() => buildLattice(W, H), [W, H]);
 
-  // 보드 판 격자 패턴을 단일 Picture 로 베이크한다(좌표 무관 순수 기하 -> W/H 로만 메모).
-  // 격자(latticePicture)와 동일한 clip 기준(최대 줌아웃 커버 = W/ZOOM_MIN + REBAKE_DIST)으로 그려
-  // 줌/팬/카메라 전 범위를 덮는다. 얇은 fill rect 를 격자선으로 쓴다(nearest, antiAlias off = 픽셀 톤).
+  // 보드 판 육각 격자 패턴을 단일 Picture 로 베이크한다(좌표 무관 순수 기하 -> lattice 로만 메모).
+  // 게임 타일과 동일한 lattice(buildLattice) 위치·straightHexPath(TILE_DRAW_W/TILE_HEX_H) 를 써 1:1 정렬한다
+  // -> 빈 판의 옅은 육각 윤곽과 드러난 타일 육각이 정확히 겹친다. 채우기 없이 stroke 만(옅은 우드 윤곽).
+  // clip 기준은 lattice 와 동일(buildLattice 가 최대 줌아웃 커버 margin 을 이미 반영) -> 줌아웃 시 검은 void 없음.
   const boardPattern = useMemo(() => {
     const marginX = (W * (1 / ZOOM_MIN - 1)) / 2 + REBAKE_DIST;
     const marginY = (H * (1 / ZOOM_MIN - 1)) / 2 + REBAKE_DIST;
@@ -444,82 +577,90 @@ export default function PixelHexMap({
     const canvas = recorder.beginRecording(
       Skia.XYWHRect(left, top, right - left, bottom - top),
     );
+    // 육각 윤곽 stroke paint(fill 아님). antiAlias off = 픽셀 톤, 두께 BOARD_LINE_PX(bake px, zoom 스케일).
     const line = Skia.Paint();
     line.setAntiAlias(false);
     line.setColor(Skia.Color(BOARD_LINE_COLOR));
-    // 세로선: bake space 원점 정렬 -> 카메라가 흘러도 격자 위상이 안정적이다.
-    // rn-skia: Skia.Path.Rect(rect) 정적 팩토리 + canvas.drawPath(fill) 로 얇은 선 rect 를 그린다.
-    const x0 = Math.ceil(left / BOARD_TILE_PX) * BOARD_TILE_PX;
-    for (let x = x0; x <= right; x += BOARD_TILE_PX) {
+    line.setStyle(PaintStyle.Stroke);
+    line.setStrokeWidth(BOARD_LINE_PX);
+    // 타일과 같은 격자 위치마다 육각 윤곽 하나(같은 straightHexPath 기하 -> 타일 드러나면 정확히 겹침).
+    for (const cell of lattice) {
       canvas.drawPath(
-        Skia.Path.Rect(Skia.XYWHRect(x, top, BOARD_LINE_PX, bottom - top)),
-        line,
-      );
-    }
-    // 가로선.
-    const y0 = Math.ceil(top / BOARD_TILE_PX) * BOARD_TILE_PX;
-    for (let y = y0; y <= bottom; y += BOARD_TILE_PX) {
-      canvas.drawPath(
-        Skia.Path.Rect(Skia.XYWHRect(left, y, right - left, BOARD_LINE_PX)),
+        straightHexPath(cell.cx, cell.cy, TILE_DRAW_W, TILE_HEX_H),
         line,
       );
     }
     return recorder.finishRecordingAsPicture();
-  }, [W, H]);
+  }, [W, H, lattice]);
 
-  // 2)+3) 영토 + 시야 안 프런티어를 하나의 똑바른 격자 Picture 로 "베이크"한다(res10 단일).
-  // 각 격자 칸 중심(화면좌표) -> screenToLatLng -> cellKeyAt(H3) 로 역매핑해 점령/테마를 정한다.
-  // - 점령 = 불투명 스프라이트(화면 어디든 "불 켜짐").
-  // - 시야 원 안 미점령 = 어둠 wash 로 덮음. 시야 밖 미개척 = 생략(지도만 비침).
+  // 낙하 중인 칸키 집합(정적 bake 에서 제외 -> 낙하 레이어가 대신 그림, 이중 그리기 방지).
+  const fallingKeySet = useMemo(() => {
+    const s = new Set();
+    for (const b of fallingBatches) for (const k of b.keys) s.add(k);
+    return s;
+  }, [fallingBatches]);
+
+  // 2)+3) reveal 된 칸을 하나의 똑바른 격자 Picture 로 "베이크"한다.
+  // 각 격자 칸 중심(화면좌표) -> screenToLatLng -> cellKeyAt(H3) 로 역매핑해 reveal 멤버십/점령/테마를 정한다.
+  // - 렌더 대상 = revealedCells.has(key)(계약 p15). 미개척은 생략(보드판만 보임 = fog of war).
+  // - occupied 여부는 스타일만: 점령=또렷(타일 원본) / 미점령=옅음(어둠 wash). reveal 밖 occupied 는 안 그림.
+  // - 낙하 중(fallingKeySet)인 칸은 정적에서 빼고 아래 fallingCells 애니 레이어가 그린다.
   // - 현재 셀(currentKey)에 매칭되는 칸 중 중앙에 가장 가까운 칸의 똑바른 육각 보더를 함께 만든다.
-  // 재베이크는 bakeAnchor/occupied/currentKey/atlas 가 바뀔 때만(zoom/pan/camera 는 Group transform 이라 deps 아님).
-  // 앵커가 카메라(coords 아님)라 화면중앙 칸=카메라칸 -> 플레이어 칸은 off-center.
+  // 뷰포트 컬링: revealedCells 전체가 아니라 lattice(=화면+최대줌아웃 margin 안의 칸)만 순회한다 ->
+  //   현재 뷰포트 밖 reveal 칸은 자연히 제외(성능). bakeAnchor 이동(REBAKE_DIST)마다 근처 칸으로 갱신.
+  // 재베이크는 bakeAnchor/revealedCells/occupied/currentKey/atlas/fallingKeySet 이 바뀔 때만.
   const latticePicture = useMemo(() => {
-    if (!bakeAnchor) return { picture: null, currentPath: null };
+    if (!bakeAnchor)
+      return { picture: null, currentPath: null, fallingCells: [] };
+    const revealed = revealedCells || EMPTY_REVEAL;
     // 베이크 공간 클립 = buildLattice 와 동일 기준(최대 줌아웃 커버 = W/ZOOM_MIN, REBAKE_DIST 드리프트 여유).
     const marginX = (W * (1 / ZOOM_MIN - 1)) / 2 + REBAKE_DIST;
     const marginY = (H * (1 / ZOOM_MIN - 1)) / 2 + REBAKE_DIST;
-    const recorder = Skia.PictureRecorder();
-    const canvas = recorder.beginRecording(
-      Skia.XYWHRect(-marginX, -marginY, W + 2 * marginX, H + 2 * marginY),
+    const bakeRect = Skia.XYWHRect(
+      -marginX,
+      -marginY,
+      W + 2 * marginX,
+      H + 2 * marginY,
     );
 
-    // res10: 점령=타일, 시야 안 미점령=어둠 wash, 현재 셀 글로우.
     const ccx = W / 2;
     const ccy = H / 2;
-    const visionSq = VISION_RADIUS_PX * VISION_RADIUS_PX;
     let currentPath = null;
     let currentDist = Infinity;
 
+    // 그릴 칸을 H3 키별로 모은다(한 H3 키 <-> 여러 lattice 칸 가능). 뷰포트 컬링 = lattice 순회 자체.
+    const keyToCells = new Map();
     for (const cell of lattice) {
       const ll = screenToLatLng(cell.cx, cell.cy, bakeAnchor, W, H);
       const key = cellKeyAt(ll.latitude, ll.longitude);
-      const occ = !!occupied[key];
-      const dx = cell.cx - ccx;
-      const dy = cell.cy - ccy;
-      const distSq = dx * dx + dy * dy;
-      const inVision = distSq <= visionSq;
 
-      // 현재 셀에 매칭되는 칸(중앙에 가장 가까운 것)의 강조 보더 위치 기억.
-      if (key === currentKey && distSq < currentDist) {
-        currentDist = distSq;
-        // 현재 셀 하일라이트는 칸 외곽(전체 크기)에 맞춘다 -> 셀 가장자리를 따라 은은한 글로우(선 없음).
-        currentPath = straightHexPath(
-          cell.cx,
-          cell.cy,
-          TILE_DRAW_W,
-          TILE_HEX_H,
-        );
+      // 현재 셀 강조 보더(중앙에 가장 가까운 칸). reveal 여부와 무관하게 위치만 기억한다.
+      if (key === currentKey) {
+        const dx = cell.cx - ccx;
+        const dy = cell.cy - ccy;
+        const distSq = dx * dx + dy * dy;
+        if (distSq < currentDist) {
+          currentDist = distSq;
+          currentPath = straightHexPath(cell.cx, cell.cy, TILE_DRAW_W, TILE_HEX_H);
+        }
       }
 
-      // 그릴지 결정: 점령(화면 어디든) / 시야 안 미개척 / 그 외 생략.
-      if (!occ && !inVision) continue;
-      const path = straightHexPath(cell.cx, cell.cy, TILE_DRAW_W, TILE_HEX_H);
+      // reveal 멤버십: 드러난 칸만 모은다.
+      if (!revealed.has(key)) continue;
+      let arr = keyToCells.get(key);
+      if (!arr) {
+        arr = [];
+        keyToCells.set(key, arr);
+      }
+      arr.push(cell);
+    }
 
-      // 1) 타일 그림(똑바른 스프라이트, nearest). atlas 로드 전이면 단색 헥스 폴백.
+    // 한 칸(cx,cy)을 칠한다: 점령=또렷(타일 원본) / 미점령=옅음(어둠 wash). 정적·낙하 공용.
+    const paintCell = (canvas, cx, cy, key, occ) => {
+      const path = straightHexPath(cx, cy, TILE_DRAW_W, TILE_HEX_H);
       const frame = atlas ? frameForCell(key) : null;
       if (frame) {
-        drawCellSprite(canvas, atlas, frame, cell.cx, cell.cy, 1);
+        drawCellSprite(canvas, atlas, frame, cx, cy, 1);
       } else {
         const colors = THEME_COLORS[cellTheme(key)] || THEME_COLORS.풀숲;
         const fill = Skia.Paint();
@@ -527,18 +668,70 @@ export default function PixelHexMap({
         fill.setColor(Skia.Color(occ ? colors.lit : colors.dim));
         canvas.drawPath(path, fill);
       }
-
-      // 2) 미점령(시야 안) 칸만 흰 막(썬크림 톤)으로 덮는다. 점령 칸은 안 칠하고 타일 원본 그대로.
       if (!occ) {
         const overlay = Skia.Paint();
         overlay.setAntiAlias(false);
         overlay.setColor(Skia.Color(UNCLAIMED_WASH));
         canvas.drawPath(path, overlay);
       }
+    };
+
+    // 정적 레이어: 낙하 중이 아닌 드러난 칸.
+    const recorder = Skia.PictureRecorder();
+    const canvas = recorder.beginRecording(bakeRect);
+    for (const [key, cells] of keyToCells) {
+      if (fallingKeySet.has(key)) continue; // 낙하 중 -> 아래 애니 레이어가 그림
+      const occ = !!occupied[key];
+      for (const cell of cells) paintCell(canvas, cell.cx, cell.cy, key, occ);
+    }
+    const picture = recorder.finishRecordingAsPicture();
+
+    // 낙하 레이어: 배치별 startMs + 칸키별 지연을 실어 개별 애니 Group 으로 그린다.
+    // 목표(안착 위치)의 정적 좌표 그대로 미니 Picture 에 그리고, FallingCell 이 translateY 로 떨군다.
+    // - 인트로 배치: 칸키 해시(hashKey)로 정렬한 rank × STEP -> 무작위 순서·거리순 아님·결정적(Math.random 회피)로 "뚝뚝 순차".
+    // - 이동 reveal 배치: 기존대로 hashKey % span 로 흩뿌림(개별 낙하).
+    const fallingCells = [];
+    for (const batch of fallingBatches) {
+      let introRank = null;
+      if (batch.intro) {
+        const sorted = [...batch.keys].sort((a, b) => hashKey(a) - hashKey(b));
+        introRank = new Map();
+        sorted.forEach((k, i) => introRank.set(k, i));
+      }
+      for (const key of batch.keys) {
+        const cells = keyToCells.get(key);
+        // 목표가 뷰포트(베이크 영역) 밖이면 컬링(안착 후 흡수 시 정적으로 나타남).
+        if (!cells) continue;
+        const occ = !!occupied[key];
+        const rec = Skia.PictureRecorder();
+        const c = rec.beginRecording(bakeRect);
+        for (const cell of cells) paintCell(c, cell.cx, cell.cy, key, occ);
+        const delay = batch.intro
+          ? introRank.get(key) * INTRO_STAGGER_STEP
+          : hashKey(key) % DROP_STAGGER_SPAN;
+        fallingCells.push({
+          batchId: batch.id, // 배치 id + 셀 키로 React key 유일화(여러 배치가 같은 셀 키를 담아도 충돌 없음)
+          key,
+          picture: rec.finishRecordingAsPicture(),
+          startMs: batch.startMs,
+          delay,
+        });
+      }
     }
 
-    return { picture: recorder.finishRecordingAsPicture(), currentPath };
-  }, [lattice, bakeAnchor, occupied, currentKey, W, H, atlas]);
+    return { picture, currentPath, fallingCells };
+  }, [
+    lattice,
+    bakeAnchor,
+    revealedCells,
+    occupied,
+    currentKey,
+    W,
+    H,
+    atlas,
+    fallingKeySet,
+    fallingBatches,
+  ]);
 
   // --- 현재 셀 glow 맥동(렌더 스레드, React 리렌더 없음) ---
   // rn-skia useClock() = SharedValue<ms>. reanimated useDerivedValue 본문은 babel worklets 로
@@ -625,6 +818,59 @@ export default function PixelHexMap({
     hopStart.value = clock.value;
   }, [coords, clock, hopStart]);
 
+  // --- reveal 낙하 배치 트리거 (+ 인트로 연출) ---
+  // newlyRevealed(이번 스텝 신규 칸키)가 오면 낙하 배치를 하나 추가한다(시작 시각 = 현재 clock).
+  // 배치 완료(지연+낙하) 후 배치를 제거 -> 그 칸들이 다음 재베이크에서 정적 bake 로 흡수(재낙하 방지).
+  // 신규 없는 스텝은 newlyRevealed=[] -> 배치 안 만든다(낙하 재발동 방지). hopStart 와 동일하게 clock.value 를 JS 에서 읽는다.
+  //
+  // 인트로 판정: 이번 신규가 reveal 전체와 같으면(size===length) = 이전에 아무것도 없던 최초/리셋 직후.
+  // reveal 은 미영속이라 앱 최초 기동·초기화(reset) 후 항상 이 조건이 걸려 인트로가 일관 재생된다.
+  // 인트로 배치는 (a) 뚝뚝 순차 낙하(latticePicture 의 delay 계산), (b) 그리드 전부 안착 후 캐릭터 낙하.
+  //
+  // useLayoutEffect(useEffect 아님): 커밋 후 "페인트 전" 동기 실행이라, setFallingBatches 로 fallingKeySet 이
+  // 프레임 페인트 전에 갱신돼 새 칸이 정적 bake 에서 즉시 제외된다. useEffect(페인트 후)면 reveal 커밋에서 정적
+  // 안착 프레임이 1번 페인트된 뒤 배치가 생겨 "바닥에 순간 보였다 사라지고 낙하"하는 깜빡임이 났다(City Run 이동).
+  // 제외 기준은 여전히 "살아있는 배치(fallingKeySet)" 뿐이라, 흡수 타이머로 배치가 빠지면 정적으로 다시 그려진다
+  // -> newlyRevealed 가 정지 중 유지돼도 착지 후 칸이 사라지지 않는다(continuity 보존).
+  useLayoutEffect(() => {
+    if (!newlyRevealed || newlyRevealed.length === 0) return;
+    const id = ++batchIdRef.current;
+    const isIntro =
+      !!revealedCells && revealedCells.size === newlyRevealed.length;
+    const batch = { id, keys: newlyRevealed, startMs: clock.value, intro: isIntro };
+    setFallingBatches((prev) => [...prev, batch]);
+
+    const n = newlyRevealed.length;
+    // 그리드 전부 안착 시각(ms). 인트로 = rank 순차(마지막 칸 지연 = (n-1)×STEP), 이동 = 해시 span.
+    const gridSettleMs = isIntro
+      ? (n - 1) * INTRO_STAGGER_STEP + DROP_DURATION
+      : DROP_STAGGER_SPAN + DROP_DURATION;
+
+    // 자기완결 타이머 — cleanup 으로 취소하지 않는다. 이 effect 는 newlyRevealed 로 매 fix 재실행되는데,
+    // 다음 fix 에서 App 이 newly 를 [] 로 비우면(계약대로) 재실행 cleanup 이 아직 발화 전인 타이머를 취소해버려
+    // 배치 흡수/캐릭터 등장이 영구 차단됐다(p17 회귀). 취소를 없애 각 타이머가 스스로 완료하게 한다.
+    // (PixelHexMap 은 앱 루트 화면이라 언마운트=앱 종료 수준 -> 언마운트 누수 우려 없음.)
+    setTimeout(() => {
+      setFallingBatches((prev) => prev.filter((b) => b.id !== id));
+    }, gridSettleMs + 80);
+
+    if (isIntro) {
+      // 최초/리셋 초기 표시: 2링(19칸)이 화면에 다 들어오게 줌을 fit 으로 되돌린다. reset 은 remount 가
+      // 아니라(App 이 reveal 만 재시드) useState 초기값이 다시 안 걸리므로 여기서 재적용한다.
+      // 이후 사용자가 핀치로 바꾸는 건 그대로(일반 이동 reveal 은 isIntro=false 라 줌 안 건드림).
+      const fitZoom = initialZoomForRing(W, H);
+      setZoom(fitZoom);
+      zoomRef.current = fitZoom;
+      baseZoomRef.current = fitZoom;
+      setIntroPetPending(true); // 그리드 낙하 동안 캐릭터 숨김
+      setTimeout(() => {
+        // 그리드 안착 -> 캐릭터 낙하 시작(순서 보장). clock.value 를 JS 에서 읽어 낙하 기준시각으로.
+        petDropStartMs.value = clock.value;
+        setIntroPetPending(false);
+      }, gridSettleMs);
+    }
+  }, [newlyRevealed, clock, revealedCells, petDropStartMs, W, H]);
+
   // --- 펫 transform(이동 hop + idle 숨쉬기) ---
   // useDerivedValue 본문은 babel worklets 로 UI 스레드에서 매 프레임 평가된다(React 리렌더 없음).
   // 위치/반전(W/H/panX/panY/facingRight/stage)은 JS 값이라 클로저 캡처 + deps 로 갱신한다.
@@ -636,41 +882,58 @@ export default function PixelHexMap({
     // 기본 왼쪽 보기 -> facingRight 면 가로 반전(±1). 알(stage 알)은 방향 없어 반전 안 함.
     const baseScaleX = facingRight && stage !== "알" ? -1 : 1;
 
-    const elapsed = clock.value - hopStart.value;
-    let hopY = 0;
+    // 인트로 캐릭터 낙하: petDropStartMs 이후 PET_DROP_DURATION 동안 위에서 떨어져 안착.
+    // 낙하 중엔 hop/숨쉬기를 억제하고 낙하 오프셋만 준다(안착 후 정상 hop/idle 복귀).
+    const dropElapsed = clock.value - petDropStartMs.value;
+    const dropping = dropElapsed >= 0 && dropElapsed < PET_DROP_DURATION;
+
+    let offsetY = 0;
     let squashY = 1;
     let squashX = 1;
-    if (elapsed >= 0 && elapsed < HOP_WINDOW) {
-      // 이동 중: 통통 튐. phase 0->1 반복, sin 으로 위로 포물선(정점=1, 바닥=0).
-      const phase = (elapsed % HOP_DUR) / HOP_DUR;
-      const lift = Math.sin(phase * Math.PI);
-      hopY = -HOP_HEIGHT * lift; // 음수 = 위로
-      squashY = 1 - SQUASH * (1 - lift); // 바닥 근처(lift~0)에서 가장 납작
-      squashX = 1 / squashY; // 부피보존 느낌(납작할 때 옆으로 약간 퍼짐)
+    if (dropping) {
+      const dt = Math.min(1, dropElapsed / PET_DROP_DURATION);
+      // 시작 높이 = (펫 화면 y + 여유)/zoom bake px -> bake offset × zoom = petBase.y+여유 만큼 화면 lift =
+      // 펫이 화면 위 경계 밖에서 출발(펫 화면 y = petBase.y, worldGroup pivot 이 펫이라 zoom 무관하게 정합).
+      const petDropHeight = (petBase.y + DROP_MARGIN) / zoom;
+      offsetY = -petDropHeight * (1 - easeDropSettle(dt)); // 위(-, 화면 밖)에서 안착(0)
     } else {
-      // 대기: 숨쉬기. scaleY 만 약하게 맥동(가로는 고정).
-      const breathe = Math.sin((clock.value / BREATHE_PERIOD) * 2 * Math.PI);
-      squashY = 1 + BREATHE_AMP * breathe;
+      const elapsed = clock.value - hopStart.value;
+      if (elapsed >= 0 && elapsed < HOP_WINDOW) {
+        // 이동 중: 통통 튐. phase 0->1 반복, sin 으로 위로 포물선(정점=1, 바닥=0).
+        const phase = (elapsed % HOP_DUR) / HOP_DUR;
+        const lift = Math.sin(phase * Math.PI);
+        offsetY = -HOP_HEIGHT * lift; // 음수 = 위로
+        squashY = 1 - SQUASH * (1 - lift); // 바닥 근처(lift~0)에서 가장 납작
+        squashX = 1 / squashY; // 부피보존 느낌(납작할 때 옆으로 약간 퍼짐)
+      } else {
+        // 대기: 숨쉬기. scaleY 만 약하게 맥동(가로는 고정).
+        const breathe = Math.sin((clock.value / BREATHE_PERIOD) * 2 * Math.PI);
+        squashY = 1 + BREATHE_AMP * breathe;
+      }
     }
 
     return [
       { translateX: petBase.x },
-      { translateY: petBase.y + hopY },
+      { translateY: petBase.y + offsetY },
       { scaleX: baseScaleX * squashX },
       { scaleY: squashY },
     ];
-  }, [petBase, facingRight, stage]);
+  }, [petBase, facingRight, stage, zoom]);
 
   // 펫 크리처 스프라이트를 로컬 원점(바닥-중앙 = 0,0)에 베이크한다. stage 가 바뀌면 다른 단계
   // 프레임으로 재베이크 -> 진화가 화면에 보인다. drawImageRectOptions 로 nearest 강제(픽셀 선명).
   // 위치/좌우 반전은 렌더 시 Group transform 으로 입혀 deps 를 작게(petAtlas, stage) 유지한다.
   const petPicture = useMemo(() => {
     if (!petAtlas) return null;
+    const row = petType ?? 0; // 계약: petType prop(0~3) = 아틀라스 row. 미전달/undefined 시 0(불).
     const col = PET_STAGE_COL[stage] ?? PET_STAGE_COL.알;
-    const frame = PET_FRAMES_BY_NAME[`sprite_${PET_TYPE_ROW}_${col}`];
+    const frame = PET_FRAMES_BY_NAME[`sprite_${row}_${col}`];
     if (!frame) return null;
-    const dstW = Math.round(frame.w * PET_SCALE);
-    const dstH = Math.round(frame.h * PET_SCALE);
+    // 스케일 = 같은 row 의 성년기(col5) 높이 기준(row 마다 원본 높이가 다를 수 있어 row 별 계산).
+    const maxFrame = PET_FRAMES_BY_NAME[`sprite_${row}_5`] || frame;
+    const petScale = PET_TARGET_MAX_H / maxFrame.h;
+    const dstW = Math.round(frame.w * petScale);
+    const dstH = Math.round(frame.h * petScale);
     // 바닥-중앙을 원점(0,0)에: 좌 = -dstW/2, 위 = -dstH -> 발이 원점, 위로 솟아 칸에 "선" 느낌.
     const left = -Math.round(dstW / 2);
     const top = -dstH;
@@ -689,7 +952,7 @@ export default function PixelHexMap({
       paint,
     );
     return recorder.finishRecordingAsPicture();
-  }, [petAtlas, stage]);
+  }, [petAtlas, stage, petType]);
 
   // --- 월드 transform(줌 피벗 + 팬) ---
   // 팬(panX/panY)은 SharedValue -> worldTransform 을 DerivedValue 로 만들어 펫과 같은 UI 스레드 값을
@@ -717,6 +980,10 @@ export default function PixelHexMap({
     [worldPivotX, worldPivotY, zoom],
   );
 
+  // 낙하 시작 높이(bake px): 화면(H)을 zoom 으로 나눠 어떤 뷰포트 칸이든 화면 위 밖에서 출발하게 한다.
+  // FallingCell 안에서 bake translateY × zoom = 화면 lift = H+DROP_MARGIN 이 되어 zoom 무관하게 화면 밖 보장.
+  const dropHeightBake = (H + DROP_MARGIN) / zoom;
+
   // coords 가 없으면 단색 배경만(App 의 상태 카드가 "위치 확인 중"을 표시). 크래시 가드.
   if (!coords) {
     return (
@@ -742,13 +1009,28 @@ export default function PixelHexMap({
                 미개척(시야 밖) 칸은 이 판 위 격자만 보인다(fog of war = 아직 안 밟은 보드판). */}
             <Picture picture={boardPattern} />
 
-            {/* 2)+3) 영토 + 시야 안 프런티어: 똑바른 육각 격자를 H3 에 역매핑해 베이크한 단일 Picture. */}
+            {/* 2)+3) reveal 된 칸(낙하 완료분): 똑바른 육각 격자를 H3 에 역매핑해 베이크한 단일 정적 Picture. */}
             {latticePicture.picture && (
               <Picture picture={latticePicture.picture} />
             )}
 
-            {/* 5) 현재 셀 하일라이트 — 선 없이 은은한 글로우만(BlurMask 로 번짐, 매 프레임 UI 스레드 맥동). */}
-            {latticePicture.currentPath && (
+            {/* 3b) 낙하 등장: 이번 스텝 신규 reveal 칸만 하늘에서 떨어져 안착(clock 기반 UI 스레드, 안착 후 정적 흡수). */}
+            {latticePicture.fallingCells.map((fc) => (
+              <FallingCell
+                key={`${fc.batchId}:${fc.key}`}
+                picture={fc.picture}
+                clock={clock}
+                startMs={fc.startMs}
+                delay={fc.delay}
+                dropHeight={dropHeightBake}
+              />
+            ))}
+
+            {/* 5) 현재 셀 하일라이트 — 선 없이 은은한 글로우만(BlurMask 로 번짐, 매 프레임 UI 스레드 맥동).
+                introPetPending=true(인트로 그리드 낙하 중)면 글로우 억제 -> 그리드 안착 후 펫과 함께 등장.
+                (인트로 중 현재 칸이 아직 하늘에서 낙하 중인데 글로우만 정위치에 먼저 번쩍이던 버그 수정.
+                 비인트로 이동은 introPetPending 이 항상 false 라 기존대로 즉시 표시 — 회귀 없음.) */}
+            {latticePicture.currentPath && !introPetPending && (
               <Path
                 path={latticePicture.currentPath}
                 color={CURRENT_GLOW}
@@ -762,8 +1044,9 @@ export default function PixelHexMap({
 
             {/* 6) 펫 크리처: 월드 Group 안 = 그리드와 동일 변환(카메라+줌/팬)을 거쳐 항상 격자와 정합.
               위치는 베이크 좌표(petBase), hop/숨쉬기/좌우반전은 로컬, 크기는 Group scale(zoom)이 처리.
-              petPicture=null(로드 전)이면 아무것도 안 그림. */}
-            {petPicture && bakeAnchor && (
+              petPicture=null(로드 전)이면 아무것도 안 그림.
+              introPetPending=true(인트로 그리드 낙하 중)면 캐릭터 숨김 -> 그리드 안착 뒤 낙하로 등장. */}
+            {petPicture && bakeAnchor && !introPetPending && (
               <Group transform={petTransform}>
                 <Picture picture={petPicture} />
               </Group>

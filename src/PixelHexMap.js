@@ -1,6 +1,8 @@
 import {
+  BlendMode,
   BlurMask,
   Canvas,
+  Circle,
   Fill,
   FilterMode,
   Group,
@@ -8,6 +10,7 @@ import {
   PaintStyle,
   Path,
   Picture,
+  RoundedRect,
   Skia,
   useClock,
   useImage,
@@ -75,6 +78,8 @@ const BG_COLOR = "#e7e1cf";
 // 패턴은 월드(worldTransform) 안에 베이크되어 걸으면(카메라 이동) 함께 흐르고, 줌/드래그에도 격자·펫과 같은
 // 변환을 거친다 -> "판 위를 걷는" 정합. 화면 고정은 단색 BG_COLOR 뿐이다. 저대비 warm brown 윤곽이라 도트를 안 가린다.
 const BOARD_LINE_PX = 2; // 육각 윤곽 두께(bake space px). zoom 스케일되어 줌아웃 시 옅게 사라진다.
+// 개발용 디버그 오버레이(zoom·cell·mode) 표시 여부. 화면 정돈 위해 기본 off, 줌 조정 필요 시 true.
+const SHOW_DEBUG_OVERLAY = false;
 const BOARD_LINE_COLOR = "rgba(120, 90, 55, 0.08)"; // 옅은 우드 브라운 윤곽선(저대비)
 
 // --- reveal 낙하 등장 애니메이션 (game-core 계약 p15) ---
@@ -92,7 +97,7 @@ const DROP_STAGGER_SPAN = 200; // ms, 칸키 해시로 흩뿌리는 최대 시�
 // 최초/리셋 후 첫 reveal(19칸)은 "뚝뚝 순차"로 낙하한 뒤, 그리드가 전부 안착하면 캐릭터(펫)가 마지막에 낙하.
 // 순차 지연은 칸키 해시(hashKey) 정렬 rank × STEP 로 만든다(무작위 순서·거리순 아님, 결정적 -> Math.random 회피).
 const INTRO_STAGGER_STEP = 110; // ms, 인트로 칸당 순차 간격(뚝뚝 떨어지는 리듬)
-// 캐릭터 낙하 시작 높이도 화면 밖 보장: (petBase.y + DROP_MARGIN)/zoom bake px 로 런타임 계산(petTransform 참고).
+// 캐릭터 낙하 시작 높이도 화면 밖 보장: (petBase.y + DROP_MARGIN)/zoom bake px 로 런타임 계산(bodyMotion 참고).
 const PET_DROP_DURATION = 900; // ms, 캐릭터 낙하 1회(가속 낙하 + 세틀 바운스). 그리드 낙하와 같은 결로 완만하게.
 
 // easeDropSettle: 0->1 진행도("하늘에서 자연스럽게 떨어져 사뿐히 안착"). translateY = -dropHeight*(1-e) 로 쓰인다.
@@ -178,6 +183,70 @@ const PET_STAGE_COL = { 알: 1, 유년: 2, 소년: 3, 청년: 4, 성년: 5 };
 // 스케일은 petType(row)마다 col5 원본 높이가 다를 수 있어 petPicture 안에서 row 별로 계산한다.
 const PET_TARGET_MAX_H = 68;
 
+// --- 플레이어(트레이너) 스프라이트(player_packed.png) ---
+// 현재 위치 타일 중앙(펫이 서던 자리)에 트레이너를 세운다. 단일 프레임(sprite_0_0, 938×1659, 정면).
+// 펫 아틀라스는 assets/pet/ 이므로 같은 구조로 assets/player/ 에 복사해 require(sample/ 원본은 그대로).
+// 방향 변형이 없어 좌우는 펫과 같은 수평 반전(facingRight). 베이크는 펫과 동일 파이프라인(원본->타일 비례
+// 축소, nearest-neighbor). 발밑 앵커(타일 중심에 발이 닿게).
+const PLAYER_ATLAS_SRC = require("../assets/player/player_packed.png");
+const PLAYER_FRAME = require("../assets/player/player_coordinate.json").frames[0];
+// 트레이너 렌더 높이(bake px). 펫 성년기(PET_TARGET_MAX_H=68)보다 약간 크게(트레이너>펫). 발밑 앵커라
+// 원본(1659px)을 이 높이로 nearest 축소한다. 화면 크기 = PLAYER_TARGET_H×zoom(worldGroup scale).
+const PLAYER_TARGET_H = 84;
+
+// --- 크리처(펫) 배치 오프셋 ---
+// 부화 후(유년~성년)는 플레이어와 한 칸에서 일부 포개져 서고, 이동 방향 기준 "뒤따르는 쪽"으로 살짝 치우친다.
+//   동쪽 이동(facingRight=true) -> 크리처가 왼쪽(서, 화면 -x) / 서쪽 이동 -> 오른쪽(동, 화면 +x).
+const CREATURE_SIDE_DX = 20; // 크리처 옆자리 가로 오프셋(bake px). 작게 둬 플레이어와 일부 겹치게(포개진 배치).
+// 2.5D 에서 화면 아래 = 시청자 쪽. 크리처를 몇 px 아래로 내려 "플레이어보다 살짝 앞에 선" 깊이감을 준다.
+const CREATURE_FRONT_DY = 6; // 크리처 앞쪽 세로 오프셋(bake px, +면 화면 아래=앞).
+// 알 단계(stage 알)는 옆에 세우지 않고 플레이어가 "안고 있는" 형태(옆구리/몸통 높이에 겹침). hop/숨쉬기 없이
+// 플레이어에 붙어 함께 움직인다(플레이어 수직 병진 offsetY 공유, 독립 hop·squash 없음).
+const HELD_DX = 14; // 알 안기 가로 오프셋(플레이어 정면 쪽, bake px)
+const HELD_UP = 26; // 알 안기 세로 오프셋(발밑 -> 옆구리/몸통 높이, bake px)
+const HELD_SCALE = 0.55; // 알 안기 축소 배율 — 원본 알이 플레이어 몸통을 덮을 만큼 커서 안았을 때만 줄인다
+const HELD_ATTACH_H = 48; // 알이 붙어 있는 플레이어 가슴 높이(bake px). 숨쉬기(squashY)로 이 지점이 오르내리는 만큼 알도 함께 움직인다
+
+// --- 시무룩(건강코드) 연출 ---
+// health 배열에 코드가 있으면 크리처를 "시무룩"하게: (a) 옅은 회청색 틴트, (b) 살짝 처진 오프셋.
+// 최소 구현 — 에셋 추가 없이 petPicture 베이크 시 색필터(Modulate=곱)로 톤을 눌러 칙칙하게 만들고,
+// 부화 크리처 transform 에 몇 px 아래 오프셋만 준다(알은 안긴 상태라 틴트만 적용, 처짐 없음).
+// Modulate(r=s*d)는 스프라이트 알파를 보존하므로 투명 영역은 그대로 두고 불투명 도트만 눌린다.
+const SAD_TINT_COLOR = "#a7adc0"; // 옅은 회청색(곱하면 채도↓·약간 어둡게 = 풀죽은 톤)
+const SAD_DROOP_DY = 3; // px(bake), 부화 크리처를 살짝 아래로 내려 "처진" 느낌
+
+// --- 능동 소통(감정 ②·말풍선 ③·케어 손맛 ④) ---
+// emotion 우선순위: sick(health>0) > joy(케어 직후) > neutral.
+//  - sick: 시무룩(회청 틴트 + 처짐). joy/neutral: 처짐·틴트 없음. 배고픔 신호는 크리처가 아니라 말풍선(needMeter)이 전담.
+//  - joy·손맛은 careEvent(App 이 케어 성공 시 찍는 {action,at}) 로 clock 기반 판정(휘발, 저장 안 함).
+const JOY_MS = 1800; // 케어 직후 파티클(하트/반짝) 1회 재생 지속(ms). joy 감정도 이 창 동안.
+// 케어 액션군 -> 파티클 종류. feed/snack/pet/play = 하트 팝 + 몸 통통 튐, wash/clean/poop = 반짝(sparkle, 튐 없음).
+const CARE_HEART_ACTIONS = new Set(["feed", "snack", "pet", "play"]);
+// 미터별 요구 색(App METER_META 와 동일: 포만 주황·행복 분홍·청결 청록). 말풍선 아이콘 색.
+const NEED_COLORS = { satiety: "#f59e0b", happiness: "#ec4899", cleanliness: "#06b6d4" };
+// 파티클 색(하트=분홍, 반짝=금색). 하트는 행복 톤, 반짝은 청결/반짝임 톤.
+const HEART_PARTICLE_COLOR = "#ff5c8a";
+const SPARKLE_PARTICLE_COLOR = "#ffd34d";
+const CARE_PARTICLE_COUNT = 5; // 팝 파티클 개수(고정 -> Hooks 순서 불변)
+
+// 절차적 심볼 SVG(이모지 tofu 회피 — 시뮬레이터에서 확실히 렌더. 원점 중심, ~16px).
+// 말풍선/파티클 공용. Skia.Path.MakeFromSVGString 로 SkPath 로 굽는다(컴포넌트 useMemo, null 가드).
+const HEART_SVG =
+  "M0 -4 C-2 -9 -8 -8 -8 -3 C-8 1 -3 4 0 7 C3 4 8 1 8 -3 C8 -8 2 -9 0 -4 Z";
+const DROPLET_SVG =
+  "M0 -8 C4 -2 6 1 6 4 C6 8 3 10 0 10 C-3 10 -6 8 -6 4 C-6 1 -4 -2 0 -8 Z";
+const SPARKLE_SVG = "M0 -7 L2 -2 L7 0 L2 2 L0 7 L-2 2 L-7 0 L-2 -2 Z";
+
+// 말풍선 규격(bake px). 크리처 머리 위에 뜨는 흰 라운드 rect + 아래 꼬리 삼각형 + 요구 심볼.
+const BUBBLE_W = 46;
+const BUBBLE_H = 34;
+const BUBBLE_R = 11;
+const BUBBLE_BOB_AMP = 4; // px, 부유(bob) 진폭
+const BUBBLE_BOB_PERIOD = 1600; // ms, 부유 1주기
+const BUBBLE_FADE_MS = 300; // ms, 등장 페이드인
+// 크리처 머리 꼭대기 기준 오프셋(bake px). petBase(발밑) 위로 크리처 높이만큼 + 여유.
+const HEAD_UP = PET_TARGET_MAX_H + 6;
+
 // --- 펫 미세 모션(이동 hop + idle 숨쉬기) ---
 // 프레임 시트 없이 정적 스프라이트 한 장을 transform 만으로 살아 움직이게 한다.
 // clock(useClock, ms) 경과시간으로 "걸음 직후 통통 튐(hop)" 과 "가만히 있을 때 숨쉬기(idle)" 를
@@ -189,6 +258,41 @@ const HOP_HEIGHT = Math.round(PET_TARGET_MAX_H * 0.25); // px, 펫 최대 높이
 const SQUASH = 0.12; // 도약/착지 순간 납작해지는 강도(과하지 않게)
 const BREATHE_AMP = 0.025; // idle scaleY 진폭(숨쉬기)
 const BREATHE_PERIOD = 2600; // ms, 숨쉬기 1주기
+
+// bodyMotion: 캐릭터(플레이어/크리처) 공용 수직 모션 계산(인트로 낙하 + 이동 hop + idle 숨쉬기).
+// 플레이어·부화 크리처가 같은 리듬으로 함께 움직이도록 한 워클릿으로 뽑았다(easeDropSettle 과 동일 패턴).
+// 반환: { offsetY(위로 -, 낙하/hop 병진), squashX/Y(hop·숨쉬기 스케일) }. 알(held)은 offsetY 만 쓰고 squash 는 무시.
+// petBaseY = 펫 화면 y(낙하 시작 높이 = 화면 밖 보장에 사용), zoom = 월드 스케일(낙하 높이 zoom 무관 정합).
+// 주의: 반드시 참조 상수들(HOP_*/SQUASH/BREATHE_*/PET_DROP_DURATION/DROP_MARGIN) 선언 뒤에 정의할 것 —
+// 모듈 worklet 클로저는 정의 시점 값을 잡으므로, 상수보다 앞에 두면 캡처가 깨져 squash 가 NaN(투명)이 된다(p23 실측).
+function bodyMotion(clockV, dropStartV, hopStartV, petBaseY, zoom) {
+  "worklet";
+  const dropElapsed = clockV - dropStartV;
+  const dropping = dropElapsed >= 0 && dropElapsed < PET_DROP_DURATION;
+  let offsetY = 0;
+  let squashX = 1;
+  let squashY = 1;
+  if (dropping) {
+    const dt = Math.min(1, dropElapsed / PET_DROP_DURATION);
+    const dropHeight = (petBaseY + DROP_MARGIN) / zoom; // 화면 위 경계 밖에서 출발
+    offsetY = -dropHeight * (1 - easeDropSettle(dt)); // 위(-, 화면 밖)에서 안착(0)
+  } else {
+    const elapsed = clockV - hopStartV;
+    if (elapsed >= 0 && elapsed < HOP_WINDOW) {
+      // 이동 중: 통통 튐. phase 0->1 반복, sin 으로 위로 포물선(정점=1, 바닥=0).
+      const phase = (elapsed % HOP_DUR) / HOP_DUR;
+      const lift = Math.sin(phase * Math.PI);
+      offsetY = -HOP_HEIGHT * lift; // 음수 = 위로
+      squashY = 1 - SQUASH * (1 - lift); // 바닥 근처(lift~0)에서 가장 납작
+      squashX = 1 / squashY; // 부피보존 느낌(납작할 때 옆으로 약간 퍼짐)
+    } else {
+      // 대기: 숨쉬기. scaleY 만 약하게 맥동(가로는 고정).
+      const breathe = Math.sin((clockV / BREATHE_PERIOD) * 2 * Math.PI);
+      squashY = 1 + BREATHE_AMP * breathe;
+    }
+  }
+  return { offsetY, squashX, squashY };
+}
 
 // 미점령(시야 안) 칸은 검은 막으로 어둡게 덮는다. 점령 칸은 칠하지 않고 타일 원본 그대로 둔다
 // (점령 = 원본 색 또렷, 미점령 = 어둠 — 대비 확실, fog of war). 지도까지 비치는 반투명이 아니라 타일 위 어두운 베일.
@@ -431,6 +535,94 @@ function FallingCell({ picture, clock, startMs, delay, dropHeight }) {
   );
 }
 
+// 케어 손맛 파티클 1개(④). 크리처 머리(anchor) 위에서 부채꼴로 흩어지며 떠올랐다 사라진다.
+// clock 기반 UI 스레드(React 리렌더 없음). startMs = careEvent 를 받은 clock 값(SharedValue).
+// index 로 각도·거리·지연을 결정(무작위 아님) -> Hooks 순서 불변(고정 개수). 월드 Group 안이라 줌/카메라 정합.
+function CareParticle({ clock, startMs, index, count, path, color, anchorX, anchorY }) {
+  // 위쪽(-90°) 중심 부채꼴로 퍼짐. 가장자리 입자일수록 옆으로.
+  const angle = -Math.PI / 2 + (index / (count - 1) - 0.5) * (Math.PI * 0.75);
+  const dist = 24 + (index % 3) * 7;
+  const dx = Math.cos(angle) * dist;
+  const delay = index * 55;
+  const transform = useDerivedValue(() => {
+    const t = Math.min(1, Math.max(0, (clock.value - startMs.value - delay) / JOY_MS));
+    const rise = 16 + t * 22; // 떠오름(위로)
+    const s = 0.55 + 0.45 * Math.sin(Math.min(1, t) * Math.PI); // 팝(커졌다 작아짐)
+    return [
+      { translateX: anchorX + dx * t },
+      { translateY: anchorY - rise },
+      { scale: s },
+    ];
+  }, [anchorX, anchorY]);
+  const opacity = useDerivedValue(() => {
+    const t = (clock.value - startMs.value - delay) / JOY_MS;
+    if (t < 0 || t > 1) return 0;
+    return Math.sin(t * Math.PI); // 페이드 인->아웃
+  });
+  if (!path) return null;
+  return (
+    <Group transform={transform}>
+      <Path path={path} color={color} opacity={opacity} />
+    </Group>
+  );
+}
+
+// 머리 위 말풍선(③). 미터 요구(needMeter) 를 절차적 도형으로 표시 — satiety=주황 원, happiness=분홍 하트,
+// cleanliness=청록 물방울. 흰 라운드 rect + 아래 꼬리 삼각 + 요구 심볼. 부드러운 부유(bob) + 등장 페이드인.
+// startMs = 말풍선 등장 clock 값(SharedValue). 월드 Group 안이라 줌/카메라를 따라 크리처 머리에 붙는다.
+function SpeechBubble({ clock, startMs, needMeter, heartPath, dropletPath, anchorX, anchorY }) {
+  // 꼬리 삼각형(아래 중앙 -> 머리 쪽). 컴포넌트 로컬(0,0 = 말풍선 좌상단) 좌표.
+  const tailPath = useMemo(() => {
+    const b = Skia.PathBuilder.Make();
+    b.moveTo(BUBBLE_W / 2 - 5, BUBBLE_H - 1);
+    b.lineTo(BUBBLE_W / 2 + 5, BUBBLE_H - 1);
+    b.lineTo(BUBBLE_W / 2, BUBBLE_H + 8);
+    b.close();
+    return b.build();
+  }, []);
+  const transform = useDerivedValue(() => {
+    const bob =
+      Math.sin((clock.value / BUBBLE_BOB_PERIOD) * 2 * Math.PI) * BUBBLE_BOB_AMP;
+    return [
+      { translateX: anchorX - BUBBLE_W / 2 },
+      { translateY: anchorY - BUBBLE_H + bob },
+    ];
+  }, [anchorX, anchorY]);
+  const opacity = useDerivedValue(() => {
+    const t = (clock.value - startMs.value) / BUBBLE_FADE_MS;
+    return Math.min(1, Math.max(0, t)) * 0.97;
+  });
+  const color = NEED_COLORS[needMeter] || "#9ca3af";
+  const icon = { translateX: BUBBLE_W / 2, translateY: BUBBLE_H / 2 };
+  return (
+    <Group transform={transform}>
+      <RoundedRect
+        x={0}
+        y={0}
+        width={BUBBLE_W}
+        height={BUBBLE_H}
+        r={BUBBLE_R}
+        color="#ffffff"
+        opacity={opacity}
+      />
+      <Path path={tailPath} color="#ffffff" opacity={opacity} />
+      {needMeter === "satiety" && (
+        <Circle cx={BUBBLE_W / 2} cy={BUBBLE_H / 2} r={8} color={color} opacity={opacity} />
+      )}
+      {needMeter === "happiness" && heartPath && (
+        <Group transform={[icon]}>
+          <Path path={heartPath} color={color} opacity={opacity} />
+        </Group>
+      )}
+      {needMeter === "cleanliness" && dropletPath && (
+        <Group transform={[icon, { scale: 0.85 }]}>
+          <Path path={dropletPath} color={color} opacity={opacity} />
+        </Group>
+      )}
+    </Group>
+  );
+}
+
 export default function PixelHexMap({
   coords,
   occupied,
@@ -440,8 +632,16 @@ export default function PixelHexMap({
   petType = 0,
   revealedCells,
   newlyRevealed,
+  health,
+  needMeter,
+  careEvent,
 }) {
   const { width: W, height: H } = useWindowDimensions();
+
+  // 시무룩 연출 게이트: 활성 건강코드가 하나라도 있으면 크리처를 풀죽게 그린다(틴트+처짐).
+  // 배고픔·심심·꼬질(미터<40) 신호는 크리처 처짐이 아니라 머리 위 말풍선(SpeechBubble, needMeter)에 일임한다
+  // — game.js targetStacks 가 미터<40 을 즉시 sick 로 바꿔 처짐용 hungry 게이트가 정상 플레이에서 도달 불가였다.
+  const sad = (health?.length ?? 0) > 0;
 
   // --- 핀치 줌 상태 ---
   // gesture-handler Pinch + React state 로 줌을 구동한다.
@@ -558,6 +758,9 @@ export default function PixelHexMap({
 
   // 펫 크리처 아틀라스(단일 useImage, 호출 순서 불변 -> Hooks 규칙 OK). 로드 전엔 null -> 펫 미표시.
   const petAtlas = useImage(PET_ATLAS_SRC);
+
+  // 플레이어(트레이너) 아틀라스(단일 useImage, 호출 순서 불변 -> Hooks 규칙 OK). 로드 전엔 null -> 미표시.
+  const playerAtlas = useImage(PLAYER_ATLAS_SRC);
 
   // 화면 고정 똑바른 육각 격자(좌표 무관 순수 기하). W/H 로만 메모(줌은 worldGroup 이 처리).
   const lattice = useMemo(() => buildLattice(W, H), [W, H]);
@@ -818,6 +1021,34 @@ export default function PixelHexMap({
     hopStart.value = clock.value;
   }, [coords, clock, hopStart]);
 
+  // --- 케어 손맛(④) + 말풍선(③) 절차적 심볼 ---
+  // 원점 중심 SkPath 를 1회만 굽는다(Skia.Path.MakeFromSVGString, null 가드). 말풍선/파티클 공용.
+  const heartPath = useMemo(() => Skia.Path.MakeFromSVGString(HEART_SVG), []);
+  const dropletPath = useMemo(() => Skia.Path.MakeFromSVGString(DROPLET_SVG), []);
+  const sparklePath = useMemo(() => Skia.Path.MakeFromSVGString(SPARKLE_SVG), []);
+
+  // 케어 연출 시작 clock(SharedValue) + 파티클 종류(state). careEvent 가 오면 clock 을 찍어 파티클을 재생하고,
+  // 하트군(feed/snack/pet/play)은 몸 통통 튐(hopStart 리셋)도 함께 준다. wash 계열은 반짝만(튐 없음).
+  const careStartMs = useSharedValue(-1e9);
+  const [careKind, setCareKind] = useState(null); // 'heart' | 'sparkle' | null(케어 전)
+  useEffect(() => {
+    if (!careEvent) return;
+    careStartMs.value = clock.value;
+    const heart = CARE_HEART_ACTIONS.has(careEvent.action);
+    setCareKind(heart ? "heart" : "sparkle");
+    if (heart) hopStart.value = clock.value; // 하트군만 즉각 점프/냠냠(통통 튐)
+  }, [careEvent, clock, careStartMs, hopStart]);
+
+  // 말풍선 등장 시각(SharedValue). needMeter 가 새로 생기면(또는 다른 미터로 바뀌면) 페이드인 기준시각 갱신.
+  const bubbleStartMs = useSharedValue(-1e9);
+  const prevNeedRef = useRef(null);
+  useEffect(() => {
+    if (needMeter && needMeter !== prevNeedRef.current) {
+      bubbleStartMs.value = clock.value;
+    }
+    prevNeedRef.current = needMeter;
+  }, [needMeter, clock, bubbleStartMs]);
+
   // --- reveal 낙하 배치 트리거 (+ 인트로 연출) ---
   // newlyRevealed(이번 스텝 신규 칸키)가 오면 낙하 배치를 하나 추가한다(시작 시각 = 현재 clock).
   // 배치 완료(지연+낙하) 후 배치를 제거 -> 그 칸들이 다음 재베이크에서 정적 bake 로 흡수(재낙하 방지).
@@ -871,54 +1102,66 @@ export default function PixelHexMap({
     }
   }, [newlyRevealed, clock, revealedCells, petDropStartMs, W, H]);
 
-  // --- 펫 transform(이동 hop + idle 숨쉬기) ---
-  // useDerivedValue 본문은 babel worklets 로 UI 스레드에서 매 프레임 평가된다(React 리렌더 없음).
-  // 위치/반전(W/H/panX/panY/facingRight/stage)은 JS 값이라 클로저 캡처 + deps 로 갱신한다.
-  // 반환 배열 = 펫 Group transform(뒤 항목이 점에 먼저 적용 -> scaleY/scaleX 가 발밑 원점에 먼저).
-  const petTransform = useDerivedValue(() => {
-    // 펫은 월드 Group(카메라+줌/팬) 안에 그려져 그리드와 동일 변환을 거친다 -> 위치 정합은 Group 이
-    // 담당하고, 여기선 베이크 좌표 + hop/숨쉬기/좌우반전만. 크기(PET_SCALE)는 고정이고 화면 크기는
-    // worldGroup 의 scale:zoom 이 정한다(줌인 크게 / 줌아웃 작게 — 격자와 함께 스케일).
-    // 기본 왼쪽 보기 -> facingRight 면 가로 반전(±1). 알(stage 알)은 방향 없어 반전 안 함.
-    const baseScaleX = facingRight && stage !== "알" ? -1 : 1;
-
-    // 인트로 캐릭터 낙하: petDropStartMs 이후 PET_DROP_DURATION 동안 위에서 떨어져 안착.
-    // 낙하 중엔 hop/숨쉬기를 억제하고 낙하 오프셋만 준다(안착 후 정상 hop/idle 복귀).
-    const dropElapsed = clock.value - petDropStartMs.value;
-    const dropping = dropElapsed >= 0 && dropElapsed < PET_DROP_DURATION;
-
-    let offsetY = 0;
-    let squashY = 1;
-    let squashX = 1;
-    if (dropping) {
-      const dt = Math.min(1, dropElapsed / PET_DROP_DURATION);
-      // 시작 높이 = (펫 화면 y + 여유)/zoom bake px -> bake offset × zoom = petBase.y+여유 만큼 화면 lift =
-      // 펫이 화면 위 경계 밖에서 출발(펫 화면 y = petBase.y, worldGroup pivot 이 펫이라 zoom 무관하게 정합).
-      const petDropHeight = (petBase.y + DROP_MARGIN) / zoom;
-      offsetY = -petDropHeight * (1 - easeDropSettle(dt)); // 위(-, 화면 밖)에서 안착(0)
-    } else {
-      const elapsed = clock.value - hopStart.value;
-      if (elapsed >= 0 && elapsed < HOP_WINDOW) {
-        // 이동 중: 통통 튐. phase 0->1 반복, sin 으로 위로 포물선(정점=1, 바닥=0).
-        const phase = (elapsed % HOP_DUR) / HOP_DUR;
-        const lift = Math.sin(phase * Math.PI);
-        offsetY = -HOP_HEIGHT * lift; // 음수 = 위로
-        squashY = 1 - SQUASH * (1 - lift); // 바닥 근처(lift~0)에서 가장 납작
-        squashX = 1 / squashY; // 부피보존 느낌(납작할 때 옆으로 약간 퍼짐)
-      } else {
-        // 대기: 숨쉬기. scaleY 만 약하게 맥동(가로는 고정).
-        const breathe = Math.sin((clock.value / BREATHE_PERIOD) * 2 * Math.PI);
-        squashY = 1 + BREATHE_AMP * breathe;
-      }
-    }
-
+  // --- 플레이어(트레이너) transform ---
+  // 타일 중앙(petBase)에 발밑 앵커로 선다. 방향 변형이 없어 좌우는 수평 반전(facingRight)만.
+  // 인트로 낙하·이동 hop·idle 숨쉬기는 크리처와 같은 bodyMotion 을 공유해 함께 움직인다.
+  // 낙하(petDropStartMs)·hop(hopStart)·숨쉬기를 한 리듬으로 -> 트레이너·크리처가 나란히 걷는 느낌.
+  const playerTransform = useDerivedValue(() => {
+    const m = bodyMotion(
+      clock.value,
+      petDropStartMs.value,
+      hopStart.value,
+      petBase.y,
+      zoom,
+    );
+    const baseScaleX = facingRight ? -1 : 1; // 기본 왼쪽 -> facingRight 면 가로 반전
     return [
       { translateX: petBase.x },
-      { translateY: petBase.y + offsetY },
-      { scaleX: baseScaleX * squashX },
-      { scaleY: squashY },
+      { translateY: petBase.y + m.offsetY },
+      { scaleX: baseScaleX * m.squashX },
+      { scaleY: m.squashY },
     ];
-  }, [petBase, facingRight, stage, zoom]);
+  }, [petBase, facingRight, zoom]);
+
+  // --- 크리처(펫) transform (알=안김 / 부화 후=옆자리 뒤따름) ---
+  // useDerivedValue 본문은 babel worklets 로 UI 스레드에서 매 프레임 평가된다(React 리렌더 없음).
+  // 위치/반전(petBase/facingRight/stage/zoom)은 JS 값이라 클로저 캡처 + deps 로 갱신한다.
+  // 크리처는 월드 Group(카메라+줌/팬) 안에 그려져 그리드와 동일 변환을 거친다 -> 위치 정합은 Group 이
+  // 담당하고, 여기선 베이크 좌표 + 배치 오프셋(옆자리/안김) + hop/숨쉬기/좌우반전만.
+  const creatureTransform = useDerivedValue(() => {
+    const isEgg = stage === "알";
+    const m = bodyMotion(
+      clock.value,
+      petDropStartMs.value,
+      hopStart.value,
+      petBase.y,
+      zoom,
+    );
+    if (isEgg) {
+      // 알: 플레이어가 안은 형태. 옆구리/몸통 높이에 겹치는 고정 오프셋. 방향 없어 반전 안 함,
+      // 독립 hop/squash 없음 — 플레이어 수직 병진(offsetY)만 공유해 붙어 함께 움직인다.
+      const heldDx = facingRight ? HELD_DX : -HELD_DX; // 정면 쪽으로 살짝
+      // 플레이어는 발 고정 squashY 로 숨쉬기/hop 스케일이 걸린다 -> 가슴 높이(HELD_ATTACH_H) 지점은
+      // squashY 에 비례해 오르내린다. 안긴 알도 그 지점에 붙어 함께 상하 이동(정지 위화감 제거).
+      const heldBob = HELD_ATTACH_H * (m.squashY - 1); // squashY>1(들숨) = 가슴 위로 -> 알도 위로
+      return [
+        { translateX: petBase.x + heldDx },
+        { translateY: petBase.y + m.offsetY - HELD_UP - heldBob },
+        { scale: HELD_SCALE }, // 발밑 원점 기준 축소(안았을 때만 작게) -> 위 translate 로 옆구리에 앉힘
+      ];
+    }
+    // 부화 후: 플레이어 옆에 나란히, 이동 방향 기준 뒤따르는 쪽. hop/숨쉬기/좌우반전 유지.
+    // facingRight=true(동쪽 이동) -> 왼쪽(서, -x) / false(서쪽) -> 오른쪽(동, +x). 둘 다 같은 방향 봄.
+    const baseScaleX = facingRight ? -1 : 1;
+    const lateralDx = facingRight ? -CREATURE_SIDE_DX : CREATURE_SIDE_DX;
+    const droop = sad ? SAD_DROOP_DY : 0; // sick 처짐(부화 크리처만). 틴트도 sick 만(petPicture).
+    return [
+      { translateX: petBase.x + lateralDx },
+      { translateY: petBase.y + m.offsetY + CREATURE_FRONT_DY + droop }, // +DY = 화면 아래(앞)로 살짝
+      { scaleX: baseScaleX * m.squashX },
+      { scaleY: m.squashY },
+    ];
+  }, [petBase, facingRight, stage, zoom, sad]);
 
   // 펫 크리처 스프라이트를 로컬 원점(바닥-중앙 = 0,0)에 베이크한다. stage 가 바뀌면 다른 단계
   // 프레임으로 재베이크 -> 진화가 화면에 보인다. drawImageRectOptions 로 nearest 강제(픽셀 선명).
@@ -943,6 +1186,12 @@ export default function PixelHexMap({
     const dst = Skia.XYWHRect(left, top, dstW, dstH);
     const paint = Skia.Paint();
     paint.setAntiAlias(false);
+    // 시무룩: 색필터(Modulate=픽셀×틴트)로 톤을 눌러 채도↓·약간 어둡게. 스프라이트 알파 보존.
+    if (sad) {
+      paint.setColorFilter(
+        Skia.ColorFilter.MakeBlend(Skia.Color(SAD_TINT_COLOR), BlendMode.Modulate),
+      );
+    }
     canvas.drawImageRectOptions(
       petAtlas,
       src,
@@ -952,7 +1201,35 @@ export default function PixelHexMap({
       paint,
     );
     return recorder.finishRecordingAsPicture();
-  }, [petAtlas, stage, petType]);
+  }, [petAtlas, stage, petType, sad]);
+
+  // 플레이어(트레이너) 스프라이트를 로컬 원점(바닥-중앙 = 0,0)에 베이크한다. 단일 프레임이라 stage 무관 —
+  // atlas 로드 시 한 번만 계산. 펫과 동일 파이프라인(발밑 앵커, nearest 강제). 높이 = PLAYER_TARGET_H.
+  const playerPicture = useMemo(() => {
+    if (!playerAtlas) return null;
+    const frame = PLAYER_FRAME;
+    const playerScale = PLAYER_TARGET_H / frame.h; // 원본 높이 -> 목표 높이 비례 축소
+    const dstW = Math.round(frame.w * playerScale);
+    const dstH = Math.round(frame.h * playerScale);
+    // 바닥-중앙을 원점(0,0)에: 좌 = -dstW/2, 위 = -dstH -> 발이 원점(타일 중심에 닿음).
+    const left = -Math.round(dstW / 2);
+    const top = -dstH;
+    const recorder = Skia.PictureRecorder();
+    const canvas = recorder.beginRecording(Skia.XYWHRect(left, top, dstW, dstH));
+    const src = Skia.XYWHRect(frame.x, frame.y, frame.w, frame.h);
+    const dst = Skia.XYWHRect(left, top, dstW, dstH);
+    const paint = Skia.Paint();
+    paint.setAntiAlias(false);
+    canvas.drawImageRectOptions(
+      playerAtlas,
+      src,
+      dst,
+      FilterMode.Nearest,
+      MipmapMode.Nearest,
+      paint,
+    );
+    return recorder.finishRecordingAsPicture();
+  }, [playerAtlas]);
 
   // --- 월드 transform(줌 피벗 + 팬) ---
   // 팬(panX/panY)은 SharedValue -> worldTransform 을 DerivedValue 로 만들어 펫과 같은 UI 스레드 값을
@@ -983,6 +1260,14 @@ export default function PixelHexMap({
   // 낙하 시작 높이(bake px): 화면(H)을 zoom 으로 나눠 어떤 뷰포트 칸이든 화면 위 밖에서 출발하게 한다.
   // FallingCell 안에서 bake translateY × zoom = 화면 lift = H+DROP_MARGIN 이 되어 zoom 무관하게 화면 밖 보장.
   const dropHeightBake = (H + DROP_MARGIN) / zoom;
+
+  // 크리처 머리 위 앵커(bake px): 말풍선(③)/케어 파티클(④)의 배치 기준. 부화 크리처 옆자리 오프셋을 반영해
+  // 크리처 머리 바로 위에 뜬다. 월드 Group 안에 그려 줌/카메라를 따라 크리처에 붙는다.
+  const creatureLateralDx = facingRight ? -CREATURE_SIDE_DX : CREATURE_SIDE_DX;
+  const headAnchorX = petBase.x + creatureLateralDx;
+  const headAnchorY = petBase.y - HEAD_UP;
+  // 말풍선은 미터 요구가 있고 알 단계(안김)가 아닐 때만(계약: 부화 후만).
+  const showBubble = !!needMeter && stage !== "알";
 
   // coords 가 없으면 단색 배경만(App 의 상태 카드가 "위치 확인 중"을 표시). 크래시 가드.
   if (!coords) {
@@ -1042,15 +1327,58 @@ export default function PixelHexMap({
               </Path>
             )}
 
-            {/* 6) 펫 크리처: 월드 Group 안 = 그리드와 동일 변환(카메라+줌/팬)을 거쳐 항상 격자와 정합.
-              위치는 베이크 좌표(petBase), hop/숨쉬기/좌우반전은 로컬, 크기는 Group scale(zoom)이 처리.
-              petPicture=null(로드 전)이면 아무것도 안 그림.
-              introPetPending=true(인트로 그리드 낙하 중)면 캐릭터 숨김 -> 그리드 안착 뒤 낙하로 등장. */}
+            {/* 6) 플레이어(트레이너) + 크리처(펫): 월드 Group 안 = 그리드와 동일 변환(카메라+줌/팬)을 거쳐
+              항상 격자와 정합. 위치는 베이크 좌표(petBase), 배치/hop/숨쉬기/좌우반전은 로컬, 크기는 Group
+              scale(zoom)이 처리. picture=null(로드 전)이면 안 그림. introPetPending=true(인트로 그리드 낙하
+              중)면 플레이어+크리처를 함께 숨김 -> 그리드 안착 뒤 bodyMotion 낙하로 함께 등장(단일 게이트).
+              z-order: 크리처(알=안김 / 부화 후=옆 겹침)를 항상 플레이어 앞(나중에 그림)에 둬 살짝 앞에 선 느낌. */}
+            {playerPicture && bakeAnchor && !introPetPending && (
+              <Group transform={playerTransform}>
+                <Picture picture={playerPicture} />
+              </Group>
+            )}
             {petPicture && bakeAnchor && !introPetPending && (
-              <Group transform={petTransform}>
+              <Group transform={creatureTransform}>
                 <Picture picture={petPicture} />
               </Group>
             )}
+
+            {/* ③ 머리 위 말풍선(미터 요구): 배고픔·심심·꼬질을 절차적 심볼로. 상단바 건강배지(병)와 다른 신호.
+                needMeter 있고 알 단계 아닐 때만. 값이 회복돼 needMeter 가 null 이 되면 사라진다. */}
+            {showBubble && bakeAnchor && !introPetPending && (
+              <SpeechBubble
+                clock={clock}
+                startMs={bubbleStartMs}
+                needMeter={needMeter}
+                heartPath={heartPath}
+                dropletPath={dropletPath}
+                anchorX={headAnchorX}
+                anchorY={headAnchorY}
+              />
+            )}
+
+            {/* ④ 케어 손맛 파티클: careEvent 후 JOY_MS 동안 하트(feed/snack/pet/play)/반짝(wash/clean/poop) 팝.
+                clock 기반이라 창 밖에선 opacity 0(항상 마운트, 재생 시에만 보임). 하트군은 몸 통통 튐도 함께. */}
+            {careKind &&
+              bakeAnchor &&
+              !introPetPending &&
+              Array.from({ length: CARE_PARTICLE_COUNT }).map((_, i) => (
+                <CareParticle
+                  key={i}
+                  clock={clock}
+                  startMs={careStartMs}
+                  index={i}
+                  count={CARE_PARTICLE_COUNT}
+                  path={careKind === "heart" ? heartPath : sparklePath}
+                  color={
+                    careKind === "heart"
+                      ? HEART_PARTICLE_COLOR
+                      : SPARKLE_PARTICLE_COLOR
+                  }
+                  anchorX={headAnchorX}
+                  anchorY={headAnchorY}
+                />
+              ))}
           </Group>
           </Group>
         </Canvas>
@@ -1064,16 +1392,18 @@ export default function PixelHexMap({
         </Pressable>
       )}
 
-      {/* 디버그 오버레이(개발용): 줌 수치 조정 편의. zoom/헥스 칸폭/배경z/모드.
-          pointerEvents none 으로 제스처를 통과시킨다. 조정 끝나면 이 블록만 지우면 된다. */}
-      <View style={styles.debug} pointerEvents="none">
-        <Text style={styles.debugText}>
-          zoom {zoom.toFixed(3)} · cell {Math.round(HEX_W * zoom)}px
-        </Text>
-        <Text style={styles.debugText}>
-          board · {mode}
-        </Text>
-      </View>
+      {/* 디버그 오버레이(개발용): 줌 수치 조정 편의. zoom/헥스 칸폭/모드.
+          pointerEvents none 으로 제스처를 통과시킨다. SHOW_DEBUG_OVERLAY 로 on/off. */}
+      {SHOW_DEBUG_OVERLAY && (
+        <View style={styles.debug} pointerEvents="none">
+          <Text style={styles.debugText}>
+            zoom {zoom.toFixed(3)} · cell {Math.round(HEX_W * zoom)}px
+          </Text>
+          <Text style={styles.debugText}>
+            board · {mode}
+          </Text>
+        </View>
+      )}
     </View>
   );
 }

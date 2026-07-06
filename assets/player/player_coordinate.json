@@ -1,0 +1,16 @@
+{
+  "image": "player_packed.png",
+  "size": {
+    "w": 942,
+    "h": 1663
+  },
+  "frames": [
+    {
+      "name": "sprite_0_0",
+      "x": 2,
+      "y": 2,
+      "w": 938,
+      "h": 1659
+    }
+  ]
+}

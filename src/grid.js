@@ -1,4 +1,12 @@
-import { latLngToCell, cellToBoundary, gridDisk, cellToParent, getResolution } from 'h3-js';
+import {
+  latLngToCell,
+  cellToBoundary,
+  gridDisk,
+  cellToParent,
+  getResolution,
+  gridPathCells,
+  greatCircleDistance,
+} from 'h3-js';
 
 // H3 육각 셀 해상도. 11 ≈ 한 칸 폭 약 50m(보행에 촘촘, 방향 전환·고정 줌 뷰용).
 // 10으로 낮추면 한 칸 폭 약 130m, 9면 자동차 이동용으로 더 커집니다.
@@ -57,6 +65,18 @@ export function resForZoom(zoom) {
   if (zoom < 2) return 6;   // 줌 1x~2x 미만: 전국을 한 화면에 (코스)
   if (zoom < 4) return 8;   // 줌 2x~4x 미만: 광역 (중간)
   return 10;                // 줌 4x 이상: 인접 지역 (고움)
+}
+
+// 두 셀 키 사이의 H3 경로를 잇는 셀 키 배열(양 끝 셀 모두 포함, from→to 순서).
+// 위치 갱신(3초/10m) 사이에 빠른 이동으로 건너뛴 칸을 채우는 경로 보간의 단일 출처.
+// 셀이 너무 멀거나 펜타곤을 가로지르면 h3 가 throw 할 수 있으니, 호출부에서 감싸 도착 칸만 처리하게 한다.
+export function pathKeys(fromKey, toKey) {
+  return gridPathCells(fromKey, toKey);
+}
+
+// 두 좌표(lat/lng) 간 대권 거리(m). 순간이동성 점프(장시간 앱 꺼짐·비행기)를 걸러내는 점프 가드에 쓴다.
+export function coordDistanceM(a, b) {
+  return greatCircleDistance([a.latitude, a.longitude], [b.latitude, b.longitude], 'm');
 }
 
 // 셀 키 기준 반경 ring 이내의 셀 키 배열(중심 포함). ring=2 면 1+6+12=19칸.

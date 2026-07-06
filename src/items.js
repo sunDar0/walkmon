@@ -2,7 +2,7 @@
 // 같은 셀은 항상 같은 "테마"와 같은 드랍 결과를 갖습니다 → "이 지역엔 이 아이템" 느낌.
 // 방문 횟수에 따라 다르게 하고 싶으면 시드에 방문 횟수를 섞으세요.
 
-function hashStr(str) {
+export function hashStr(str) {
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) {
     h ^= str.charCodeAt(i);

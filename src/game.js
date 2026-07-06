@@ -3,12 +3,18 @@
 // 같은 셀을 재방문해도 이 시간이 지나기 전에는 보상이 안 나옵니다(제자리 파밍 방지).
 export const COOLDOWN_MS = 1000 * 60 * 60; // 1시간
 
-// 신규 셀은 크게, 재방문은 소량 → 탐험을 유도.
-// res11(칸 폭 ~50m)은 res10(~130m)보다 걷기 시 새 칸을 약 2.6배 자주 밟으므로,
-// 걷는 거리당 성장 속도를 보존하려고 칸당 XP·포인트를 그 비율(÷2.5)만큼 낮췄다.
-// 신규:재방문 비(5:1)는 유지해 탐험 유도 강도는 그대로 둔다.
-export const NEW_CELL_XP = 10;
-export const REVISIT_XP = 2;
+// 경로 보간(자전거·차·지하철 등 빠른 이동 시 위치 갱신 사이 건너뛴 칸 채우기)의 점프 가드.
+// 직전 좌표와 새 좌표 간 거리가 이 값을 넘으면 순간이동성 점프(장시간 앱 꺼짐·비행기 등)로 보고
+// 중간 칸을 채우지 않고 도착 칸만 처리한다(오점령 방지).
+export const PATH_FILL_MAX_M = 2000; // 2km
+
+// 이동 = AP(액션포인트) 적립. 케어 성장 모델(p26)에서 이동은 XP 를 직접 주지 않고
+// AP 를 쌓아, 그 AP 로 케어 부스트·치료를 한다. 신규 칸이 재방문보다 크게(탐험 유도).
+// 실제 적립 = 기본값 × 미터팩터(meterFactor). 방치(미터 낮음)면 적립이 줄어든다.
+export const AP_NEW = 3;
+export const AP_REVISIT = 1;
+
+// 셀 누적 점수(occupied[key].points) 증가량. AP·XP 와 별개의 셀 단위 값.
 export const NEW_CELL_POINTS = 4;
 export const REVISIT_POINTS = 1;
 
@@ -32,4 +38,73 @@ export function canEvolve(stageXp, stageIndex) {
     stageIndex < STAGES.length - 1 &&
     levelInStage(stageXp, stageIndex) >= STAGE_MAX_LEVEL[stageIndex]
   );
+}
+
+// ── 케어 모델(다마고치 루프) 밸런스 ──────────────────────────────────────────
+// 미터 3종은 0~100. 시간 경과로 선형 감소하고, 케어로 회복한다.
+
+export const DAY_MS = 24 * 60 * 60 * 1000;
+
+// 각 미터가 가득(100)에서 바닥(0)까지 감소하는 데 걸리는 시간(ms). 시간비례 선형.
+export const METER_DECAY_MS = {
+  satiety: 24 * 60 * 60 * 1000, // 포만감 24h
+  happiness: 48 * 60 * 60 * 1000, // 행복도 48h
+  cleanliness: 72 * 60 * 60 * 1000, // 청결도 72h
+};
+
+// 케어/치료의 AP 비용.
+export const CARE_AP_COST = 2; // 케어 1회 부스트(정상 XP) 비용
+export const TREAT_AP_COST = 4; // 건강코드 1개 치료 비용
+
+// 건강코드 발현 임계·스택. 미터가 낮을수록 그 미터의 코드 스택이 늘어난다(미터당 최대 3).
+export const HEALTH_THRESHOLD = 40; // 이 값 이상이면 코드 없음(스택 0)
+// 미터별 건강코드 3종(발현 후보). judgeHealth 가 이 중 결정적 무작위로 채운다.
+export const HEALTH_CODES = {
+  satiety: ['쇠약', '어지럼', '영양실조'],
+  happiness: ['우울', '외로움', '무기력'],
+  cleanliness: ['가려움', '악취', '질병'],
+};
+
+// 미터값 → 목표 스택 수(0~3). 낮을수록 깊어 코드가 늘어난다.
+// 임계(40) 이상이면 0. 아래로 갈수록 25/10 을 넘겨 1→2→3 스택.
+export function targetStacks(meterValue) {
+  if (meterValue >= HEALTH_THRESHOLD) return 0;
+  if (meterValue >= 25) return 1;
+  if (meterValue >= 10) return 2;
+  return 3;
+}
+
+// 방치 페널티 계수. 미터 평균이 가득이면 1, 바닥이면 0.33. 이동 AP 적립에 곱한다.
+export function meterFactor(meters) {
+  const avg = (meters.satiety + meters.happiness + meters.cleanliness) / 3;
+  return 0.33 + 0.67 * (avg / 100);
+}
+
+// 경과 시간(ms)만큼 미터 3종을 선형 감소시켜 새 객체로 반환(0~100 클램프). 순수.
+export function decayMeters(meters, elapsedMs) {
+  const step = (v, fullMs) => Math.max(0, Math.min(100, v - (100 * elapsedMs) / fullMs));
+  return {
+    satiety: step(meters.satiety, METER_DECAY_MS.satiety),
+    happiness: step(meters.happiness, METER_DECAY_MS.happiness),
+    cleanliness: step(meters.cleanliness, METER_DECAY_MS.cleanliness),
+  };
+}
+
+// 케어 액션 정의(치료 제외 7종). meters = 회복 델타, xp = AP 부스트 시 크리처 XP(미부스트 시 ÷3).
+export const CARE_ACTIONS = {
+  feed: { label: '먹이', meters: { satiety: 40 }, xp: 6 },
+  snack: { label: '간식', meters: { satiety: 15, happiness: 5 }, xp: 3 },
+  pet: { label: '쓰다듬', meters: { happiness: 20 }, xp: 4 },
+  play: { label: '놀기', meters: { happiness: 40 }, xp: 8 },
+  wash: { label: '씻기', meters: { cleanliness: 35 }, xp: 6 },
+  clean: { label: '청소', meters: { cleanliness: 35 }, xp: 6 },
+  poop: { label: '똥치우기', meters: { cleanliness: 25 }, xp: 4 },
+};
+
+// 나이(표시용). 성장과 무관 — 총 나이(태어난 시각 기준)와 단계 나이(현 단계 진입 기준)를 일 단위로.
+export function ageInfo(state, now) {
+  return {
+    totalDays: state.bornAt ? Math.floor((now - state.bornAt) / DAY_MS) : 0,
+    stageDays: state.stageStartedAt ? Math.floor((now - state.stageStartedAt) / DAY_MS) : 0,
+  };
 }

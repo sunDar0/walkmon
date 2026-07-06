@@ -5,14 +5,16 @@
 //   2) onLocation 콜백에서 좌표를 받아 점령 로직을 저장소(예: AsyncStorage/SQLite)에 기록
 //   3) 앱이 포그라운드로 돌아오면 저장된 누적분을 화면에 반영
 //
-// 주의: 포그라운드 추적(useLocation)과 동시에 켜면 보상이 중복될 수 있으니,
-//       점령 처리는 한쪽(셀 키 + lastVisit 쿨다운)에서 멱등하게 처리하세요.
+// 주의: 포그라운드 추적(useLocation)과 동시에 켜면 두 writer 가 같은 저장 키를 각자
+//       read-modify-write 해 lost update 가 난다. 그래서 태스크는 앱이 포그라운드 active 인
+//       동안엔 이번 배치를 skip 해 단일 writer 를 보장한다(아래 AppState 가드 참고).
 
+import { AppState } from 'react-native';
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { STORAGE_KEY, INITIAL_STATE, applyVisit } from './occupy';
+import { STORAGE_KEY, STORAGE_KEY_V3, hydrate, applyPath } from './occupy';
 
 const TASK_NAME = 'walkmon-bg-location';
 
@@ -21,16 +23,35 @@ TaskManager.defineTask(TASK_NAME, async ({ data, error }) => {
   const { locations } = data || {};
   if (!locations || locations.length === 0) return;
 
-  // React 밖이라 state 가 없다 → 저장소에서 읽어 occupy.js 의 applyVisit 로 누적 후 다시 저장.
-  // 포그라운드와 같은 STORAGE_KEY/규칙을 공유하므로 쿨다운으로 중복 보상이 멱등하게 막힌다.
+  // 단일 writer 보장: 앱이 포그라운드 active 인 동안엔 포그라운드(useLocation→App)가 같은 좌표를
+  // 이미 처리·저장한다. 백그라운드가 여기서 또 read-modify-write 하면 두 복사본이 갈라져
+  // lost update(AP·미터 감소분 유실)가 나므로 active 면 이번 배치를 통째로 skip 한다(손실 아님).
+  // fail-safe: 'active' 로 명시될 때만 skip. 'background'/'inactive'/'unknown'(헤드리스 콜드
+  // 런치 포함)은 포그라운드가 살아있지 않다는 뜻이라 처리·저장해 백그라운드 추적을 지킨다.
+  if (AppState.currentState === 'active') return;
+
+  // React 밖이라 state 가 없다 → 저장소에서 읽어 applyPath 로 누적 후 다시 저장(이제 단일 writer).
   try {
-    const raw = await AsyncStorage.getItem(STORAGE_KEY);
-    let state = raw ? { ...INITIAL_STATE, ...JSON.parse(raw) } : INITIAL_STATE;
+    // v4 우선, 없으면 v3 저장본을 hydrate 로 마이그레이션(포그라운드 로드와 동일 규칙).
+    let raw = await AsyncStorage.getItem(STORAGE_KEY);
+    let loadedFromV3 = false;
+    if (!raw) {
+      raw = await AsyncStorage.getItem(STORAGE_KEY_V3);
+      loadedFromV3 = !!raw;
+    }
     const now = Date.now();
+    let state = hydrate(raw ? JSON.parse(raw) : {}, now);
+    // 배치 내 연속 좌표 사이를 applyPath 로 경로 보간(건너뛴 칸 채움). prev 는 배치 안에서만 이어지고,
+    // 배치 경계(직전 태스크 실행의 마지막 좌표 → 이번 배치 첫 좌표)는 채우지 않는다 — 그 좌표를 이으려면
+    // 상태에 좌표를 남겨야 해 shape 변경 비용이 크므로, 배치 내 채우기까지만 한다(한계로 명시).
+    let prev = null;
     for (const loc of locations) {
-      state = applyVisit(state, loc.coords, now).state;
+      state = applyPath(state, prev, loc.coords, now).state;
+      prev = loc.coords;
     }
     await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    // v3 를 읽어 v4 로 옮겼으면(v4 부재) 죽은 v3 키 제거. v4 가 이미 있었으면 v3 는 안 건드림.
+    if (loadedFromV3) await AsyncStorage.removeItem(STORAGE_KEY_V3);
   } catch {}
 });
 

@@ -210,6 +210,19 @@ export default function App() {
     registerBackgroundLocation().catch(() => {});
   }, []);
 
+  // 개발 빌드 전용 상태 디버그 훅(expo-build-run 검증용). __DEV__ 가드라 프로덕션 번들엔 안 들어간다.
+  // 시뮬레이터/디버거에서 global.__WALKMON__ 로 실제 상태 값(meters·ap·health·occupied 크기)을
+  // 육안 상태 카드 없이 대조하는 통로. 웹/네이티브 모두 global 이 있어 안전. 읽기 전용 노출이라 게임 로직·렌더엔 영향 없음.
+  useEffect(() => {
+    if (!__DEV__) return;
+    global.__WALKMON__ = {
+      gameState,
+      coords,
+      currentKey,
+      occupiedCount: Object.keys(gameState.occupied || {}).length,
+    };
+  }, [gameState, coords, currentKey]);
+
   // 좌표 갱신 → 셀 판정 → 점령/보상 처리(occupy.js 의 순수 함수에 위임)
   const handleCoords = useCallback((c) => {
     setCoords(c);

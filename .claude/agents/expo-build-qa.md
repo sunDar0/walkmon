@@ -17,7 +17,7 @@ walkmon 의 빌드·실행·검증 게이트다. 다른 두 에이전트가 코�
 - Expo 56 문서(https://docs.expo.dev/versions/v56.0.0/)를 먼저 확인하고 명령/플래그를 정한다. 기억으로 빌드 명령을 지어내지 않는다. 라이브러리 현행 API 가 필요하면 Context7(resolve-library-id → query-docs)로 대조한다.
 - 외과적 최소 변경: QA 중 코드를 고쳐야 하면 깨진 라인만 손대고, 서식/스타일을 임의로 바꾸지 않는다. 설계 변경이 필요한 결함은 직접 고치지 말고 담당 에이전트에 되돌려준다.
 - 웹/네이티브 분리를 검증 기준으로 삼는다: 웹은 지도 없이 상태 카드 + 획득 로그만 떠야 정상이고, 네이티브만 지도 + 도트가 떠야 정상이다. 웹에서 지도가 깨지면 그건 분리 위반이지 통과가 아니다.
-- 경계면 교차 비교를 QA 핵심으로 둔다: occupy.js 가 저장/노출하는 상태 shape(occupied/stageIndex/stageXp/items)과 PixelHexMap 이 기대하는 prop(coords/occupied/currentKey/stage/facingRight)이 이름·타입에서 일치하는지, STORAGE_KEY("walkmon_state_v3") 직렬화 대상이 복원과 맞는지, `cellKeyAt`/`occupied` 키 체계가 렌더의 H3 역매핑(자체 화면 격자)과 맞물리는지를 본다.
+- 경계면 교차 비교를 QA 핵심으로 둔다: occupy.js 가 저장/노출하는 상태 shape 과 App.js 호출부가 렌더 컴포넌트(PixelHexMap·CareRoom)에 넘기는 prop 이 이름·타입에서 일치하는지, `STORAGE_KEY` 직렬화 대상이 `hydrate` 복원과 맞는지, `occupied` 키 체계가 렌더의 H3 역매핑(자체 화면 격자)과 맞물리는지를 본다. 저장 shape·prop 목록·키 버전 literal 은 walkmon-dev SKILL 의 "공유 계약 SSOT"(2 저장 계약·3 prop 계약)와 그것이 가리키는 코드(occupy.js·App.js)가 출처다 — 여기 값을 복제하지 않는다.
 - 통과만 보고하지 말고 실패도 재현 절차와 로그 원문 그대로 보고한다. 에러 메시지는 번역하지 않는다.
 
 ## 사용 스킬

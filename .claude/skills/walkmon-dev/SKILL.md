@@ -25,18 +25,28 @@ Expo56 문서 확인이 누락되기 쉽다. 분업이 곧 안전장치다.
 | 에이전트 | 담당 축 | 사용 스킬 | 주요 파일 |
 |---|---|---|---|
 | game-core-engineer | 점령 로직 / H3 그리드 / 위치 추적 / 영속화 | game-mechanics, location-tracking | src/game.js, src/grid.js, src/items.js, src/occupy.js(applyVisit·evolve·STORAGE_KEY), src/useLocation.js, src/backgroundLocation.js, App.js(handleCoords 배선) |
-| pixel-render-engineer | 도트(픽셀) 렌더 / 헥스 오버레이 / 스프라이트 | pixel-rendering | src/PixelHexMap.js, src/PixelHexMap.web.js (react-native-skia 타일맵) |
+| pixel-render-engineer | 도트(픽셀) 렌더 / 헥스 오버레이 / 스프라이트 / 케어룸 크리처 | pixel-rendering | src/PixelHexMap.js, src/CareRoom.js, src/FullMap.js 와 각 `.web.js` 짝 (react-native-skia) |
 | expo-build-qa | Expo 빌드·실행·네이티브 재빌드·시뮬 검증 | expo-build-run | app.json, package.json, app/index.tsx, App.js(배선/통합 검증용 읽기만, 게임상태 편집은 game-core-engineer) |
 
 스킬은 네 개(game-mechanics / location-tracking / pixel-rendering / expo-build-run)뿐이다.
 이 매핑을 벗어난 스킬·에이전트 이름을 지어내지 않는다.
 
-## 절대 규칙 (모든 Phase 에 적용)
+## 공유 계약 (SSOT — 모든 에이전트가 여기서 읽는다)
+
+여러 에이전트가 공유하는 계약은 아래 네 범주로만 둔다. 구체 수치·필드·prop 목록은 **코드가 최종 출처**이고, 이 절은 "어느 코드가 출처인가"만 가리킨다. 에이전트 정의 파일은 이 계약을 다시 서술하지 말고 이 절을 참조한다. literal(키 이름·shape·prop 목록)을 여러 문서에 복제하면 drift 난다 — 실제로 저장 키가 v3→v4 로 바뀌며 문서 곳곳이 옛 값을 가리킨 적이 있다.
+
+1. **플랫폼 분리(웹/네이티브)** — react-native-skia·react-native-maps 는 네이티브 전용이라 import 만 해도 웹 번들이 깨진다. 규약: 네이티브 시각 컴포넌트는 `src/X.js`(네이티브) + `src/X.web.js`(웹 스텁 = `null` 또는 상태 카드) **쌍**으로 분리한다. 웹 = 상태/로그만, 네이티브 = 보드 + 도트 + 크리처. 현재 쌍(출처 = 파일 존재): `PixelHexMap` · `CareRoom` · `FullMap` · `GameMap`(레거시). 새 시각 컴포넌트를 추가하면 반드시 `.web.js` 짝을 만든다.
+
+2. **저장 계약(영속화)** — 단일 출처: `src/occupy.js` 의 `STORAGE_KEY` · `INITIAL_STATE` · `hydrate`(정규화·마이그레이션). 케어 성장 모델로 shape 이 확장됐고(현재 키 v4), 정확한 필드·기본값·구버전 backfill 규칙은 occupy.js 가 최종 출처다 — 이 문서·에이전트 파일에 shape literal 을 복제하지 않는다. shape 을 바꾸면 game-core-engineer 가 occupy.js 에서 확정(키 버전을 올리거나 `hydrate` 에 마이그레이션 추가)하고, 렌더 쪽은 그 shape 을 읽기만 한다. occupy.js 는 React 비의존 순수 함수라 포그라운드(App.js)·백그라운드가 같은 결과를 내야 한다 — 점령/AP 규칙을 바꾸면 양 경로를 함께 확인한다.
+
+3. **prop 계약(App.js → 렌더 컴포넌트)** — 단일 출처: `App.js` 의 각 컴포넌트 JSX 호출부. 렌더 에이전트는 prop 목록을 자기 정의에 복제하지 말고 호출부를 읽는다. `<PixelHexMap .../>` 와 `<CareRoom .../>` 가 넘기는 prop 집합(케어 모델로 `health` · `needMeter` · `careEvent` · `petType` 등이 추가됨)이 곧 계약이다. game-core 가 상태 shape 을 바꾸면 App.js 호출부가 바뀌고, 그게 렌더 계약의 변경점이다.
+
+4. **소유권 경계** — 위 "에이전트 ↔ 스킬 매핑" 표가 소유의 단일 출처다. 요약: game-core-engineer = 로직·상태·영속화(occupy.js SSOT 소유), pixel-render-engineer = Skia 렌더·아틀라스(App.js 호출부 prop 을 읽기만), expo-build-qa = 빌드·검증(저장 shape ↔ 렌더 prop 경계면 교차 비교). 경계를 벗어난 결함은 계약을 깬 쪽으로 되돌린다.
+
+### 프로세스 규칙 (계약 아님 · 모든 Phase 공통)
 
 - 코드 작성 전 Expo 56 문서(https://docs.expo.dev/versions/v56.0.0/)와 라이브러리 현행 API(Context7)를 확인하도록 각 에이전트에 지시한다. 기억에 의존하지 않는다.
 - 외과적 최소 변경: 요청과 직결된 라인만. 추측성 추상화·기능·예외처리 금지, 인접 서식 임의 변경 금지.
-- 플랫폼 분리 불변: 웹 = 상태/로그만(렌더 없음), 네이티브 = 보드 배경 + 도트. react-native-skia(및 레거시 react-native-maps)는 네이티브 전용이라 import 만 해도 웹 번들이 깨진다. 새 시각 기능은 항상 `.js`(네이티브)/`.web.js`(웹) 로 분리한다.
-- 영속화 계약: STORAGE_KEY = "walkmon_state_v3"(src/occupy.js), 저장 shape 은 { occupied, stageIndex, stageXp, items }. 상태 shape 을 바꾸면 game-core-engineer 가 SSOT 를 정하고 pixel-render-engineer 가 그 shape 을 읽기만 한다.
 
 ---
 

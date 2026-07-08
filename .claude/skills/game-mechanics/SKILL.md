@@ -88,9 +88,11 @@ export function applyVisit(state, coords, now) {
       lastVisit: now,
     },
   };
-  return { state: { occupied, stageIndex: state.stageIndex, stageXp, items }, changed: true, currentKey: key };
+  return { state: { ...state, occupied, stageXp, items }, changed: true, currentKey: key };
 }
 ```
+
+> 위 스니펫은 신규/재방문/쿨다운 **판정 규칙**만 보여주는 단순화 버전이다. 반환 state 는 `...state` 로 케어 모델 필드(`petType`·`ap`·`meters`·`health`·타임스탬프)를 보존한다. 실제 `occupy.js` 의 `applyVisit` 은 `applyPath`(경로 보간)와 `tickState`(미터·AP 정산)를 거치므로, 상태 shape·정산 로직의 최종 출처는 occupy.js 다(위 shape literal 을 복제하지 말 것).
 
 규칙은 세 갈래다.
 
@@ -160,52 +162,18 @@ export function rollItem(cellKey) {
 
 ## 상태 shape 과 영속화
 
-게임 상태는 `App.js` 의 단일 `gameState` 객체이고, 그 shape·기본값·저장 키는 `src/occupy.js` 가 정의한다(포그라운드·백그라운드 공유).
+게임 상태는 `App.js` 의 단일 `gameState` 객체이고, 그 shape·기본값·저장 키·정규화(마이그레이션)는 `src/occupy.js` 가 단일 출처로 정의한다(포그라운드·백그라운드 공유). 저장 키·`INITIAL_STATE` 의 실제 값은 여기 복제하지 않는다 — 복제하면 drift 난다(과거 저장 키가 v3→v4 로 바뀌며 문서 곳곳이 옛 값을 가리킨 적이 있다). 상세 계약은 walkmon-dev SSOT 의 "저장 계약(영속화)" 절을 본다.
 
-```js
-// src/occupy.js
-export const STORAGE_KEY = 'walkmon_state_v3';
-export const INITIAL_STATE = { occupied: {}, stageIndex: 0, stageXp: 0, items: [] };
+- 단일 출처: `src/occupy.js` 의 `STORAGE_KEY`(현재 키) · `INITIAL_STATE`(기본값) · `hydrate`(로드 정규화·구버전 backfill) · `tickState`(오프라인 경과 정산).
+- 게임 규칙이 읽는 필드: `occupied`(셀별 누적 점수 + 마지막 방문 epoch ms, 키는 H3 셀 키), `stageIndex`/`stageXp`(성장 단계와 단계 내 XP — 레벨·진화는 `levelInStage`/`canEvolve` 로 파생), `items`(최근 획득 로그, 최신순 20개로 잘림).
+- 케어 성장 모델로 `petType` · `ap` · `meters`(satiety·happiness·cleanliness) · `health` 와 타임스탬프 필드가 더 붙어 있다. 정확한 필드·기본값·backfill 규칙은 occupy.js 가 최종 출처다 — 이 문서에 shape literal 을 복제하지 않는다.
 
-// shape
-occupied:   { [cellKey]: { points: number, lastVisit: number } }
-stageIndex: number   // 0~4 (현재 성장 단계)
-stageXp:    number   // 현재 단계 내 누적 XP (진화 시 이월 계산)
-items:      [{ item: string, key: cellKey, t: number }]  // 최근 20개
-```
+영속화는 `App.js` 에서 "불러오기 1회 + 변경마다 저장" 이다. `gameState` 를 통째로 직렬화하고, 로드 시 `occupy.js` 의 `hydrate` 로 정규화한다(누락 필드 backfill·타임스탬프 채움·손상값 방어). 핵심 두 가지:
 
-- `occupied`: 셀별 누적 점수와 마지막 방문 시각(쿨다운 판정용 epoch ms). 키는 H3 셀 키.
-- `stageIndex`/`stageXp`: 성장 단계와 단계 내 XP. 레벨·진화는 여기서 파생(`levelInStage`/`canEvolve`).
-- `items`: 최근 획득 로그, 최신순 20개로 잘린다.
+- **로드 가드.** 마운트 직후 빈 초기값이 저장 effect 를 먼저 발동시켜 로드 전 데이터를 덮어쓰지 않도록, 로드 완료 플래그(`loaded`) 안쪽에서만 저장한다. 새 영속 필드를 추가할 때도 이 가드 안에서 저장한다.
+- **누락 필드 backfill.** `hydrate` 가 저장본을 `INITIAL_STATE` 기준으로 정규화하므로 구버전 저장본의 누락 필드는 자동으로 기본값이 채워진다. 필드를 추가할 땐 occupy.js 의 `INITIAL_STATE`/`hydrate` 에서 확정한다 — App.js 는 그 결과를 읽기만 한다.
 
-영속화는 `App.js` 에서 "불러오기 1회 + 변경마다 저장" 이다. `gameState` 를 통째로 직렬화한다.
-
-```js
-const loaded = useRef(false);
-
-// 1) 마운트 시 1회 로드. 누락 필드는 INITIAL_STATE 로 메워 하위호환.
-useEffect(() => {
-  (async () => {
-    try {
-      const raw = await AsyncStorage.getItem(STORAGE_KEY);
-      if (raw) setGameState({ ...INITIAL_STATE, ...JSON.parse(raw) });
-    } catch {}
-    loaded.current = true;
-  })();
-}, []);
-
-// 2) 상태가 바뀔 때마다 저장 (첫 로드 전엔 건너뜀)
-useEffect(() => {
-  if (!loaded.current) return;
-  AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(gameState)).catch(() => {});
-}, [gameState]);
-```
-
-**`loaded` 가드가 핵심이다.** 이게 없으면 마운트 직후 빈 초기값(`INITIAL_STATE`)이 저장 effect 를 먼저 발동시켜, 로드가 끝나기 전에 저장된 데이터를 빈 값으로 덮어쓴다. 새 영속 필드를 추가할 때도 이 가드 안쪽에서 저장한다.
-
-**새 필드 영속화.** `INITIAL_STATE` 에 키를 더하면 `{ ...INITIAL_STATE, ...저장본 }` 병합이 구버전 저장본의 누락 필드를 자동으로 기본값으로 메운다 — 별도 `|| 기본값` 방어가 필요 없다.
-
-**스키마가 깨지는 변경엔 키 버전을 올린다.** `walkmon_state_v3` → `_v4`. 셀 키 해상도 변경, 상태 shape 변경처럼 옛 데이터로 못 읽는 경우다. 키를 올리면 옛 데이터는 그냥 버려진다(=초기화). 버리기 싫으면 옛 키를 읽어 변환 후 새 키로 저장하는 일회성 마이그레이션을 로드 effect 에 넣는다. (성장 shape 을 xp → stageIndex/stageXp 로 바꾸며 v2→v3 로 올린 게 이 경우다.)
+**스키마가 깨지는 변경엔 키 버전을 올린다.** 셀 키 해상도 변경, 상태 shape 변경처럼 옛 데이터로 못 읽는 경우다. 키를 올리면 옛 데이터는 버려진다(=초기화). 버리기 싫으면 옛 키를 읽어 변환하는 일회성 마이그레이션을 `hydrate` 에 넣는다. 실제로 성장 shape 을 xp → stageIndex/stageXp 로 바꾸며 v2→v3 로, 케어 모델(ap·meters·health)을 더하며 v3→v4 로 올렸고 현재 키는 v4 다. 키·마이그레이션의 단일 출처는 occupy.js(`STORAGE_KEY`/`hydrate`)다.
 
 ## 밸런스 손잡이 한눈에
 
@@ -226,7 +194,7 @@ useEffect(() => {
 
 - 밸런스만 바꿨으면 의도가 맞는지 손계산으로 확인한다(예: `levelInStage(90, 0)` = Lv.3, `canEvolve(300, 0)` = true, `canEvolve(299, 0)` = false).
 - `cellsAround` 반환 shape 을 건드렸으면 렌더(`PixelHexMap.js`, react-native-skia)의 H3 역매핑과 어긋나지 않는지 확인하고, 시각 쪽은 pixel-rendering 스킬 영역임을 인지한다.
-- 저장 스키마를 바꿨으면 구버전 저장본 로드 시 `|| 기본값` 방어가 되는지, 필요하면 `STORAGE_KEY` 를 올렸는지 확인한다.
+- 저장 스키마를 바꿨으면 구버전 저장본 로드 시 `hydrate` 가 누락 필드를 backfill 하는지, 스키마가 깨지면 `STORAGE_KEY` 를 올렸는지 확인한다(키·shape·마이그레이션의 단일 출처는 occupy.js).
 - 실행 확인(`expo start`, 시뮬레이터/웹 구동, 네이티브 재빌드 여부)은 expo-build-run 스킬(expo-build-qa 에이전트)에 맡긴다.
 
 ## 관련

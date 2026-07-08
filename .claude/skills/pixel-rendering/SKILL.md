@@ -223,6 +223,30 @@ const hero = useImage(require("../assets/sprites/hero.png")); // 로드 전엔 n
   `<Rect>` 몇 개로 2~3 색 디더 패턴을 깐다. 에셋 파이프라인 없이 바로 화면을 채워 반복 개발이
   빨라진다. 무료 타일셋은 그다음에 붙인다.
 
+## (7) 에셋 슬라이싱 스크립트 (격자 시트 → 아틀라스)
+
+새 스프라이트 시트를 손으로 잘라 좌표 JSON 을 만들지 말 것. `scripts/slice_sheet.py` 가 균등 격자
+(rows×cols) PNG 를 받아 walkmon 아틀라스 한 쌍을 만든다.
+
+- **언제**: 새 캐릭터·타일 스프라이트 시트(한 장에 격자로 배열)를 PixelHexMap 아틀라스로 편입할 때.
+- **출력**: `<name>_packed.png` + `<name>_coordinate.json`. 이 좌표 스키마는 기존
+  `assets/*/*_coordinate.json`(grid/monster/player)과 동일하다 —
+  `{ image, size:{w,h}, frames:[{name:"sprite_{row}_{col}", x, y, w, h}] }`.
+  PixelHexMap.js 가 `PET_STAGE_COL`·`frames[].name`·`{x,y,w,h}` 로 그대로 소비한다.
+- **처리**: 셀 crop → **알파 바운딩박스로 trim**(투명 여백 제거) → 여백 최소 shelf 팩. 완전 투명
+  셀은 스킵(frames 에서 빠짐). **리사이즈·안티앨리어싱 없음**(crop/paste 만 → 원본 픽셀 보존, nearest
+  전제와 일치). 같은 입력 → 같은 출력(결정적).
+- **의존성**: Pillow. 없으면 `pip install Pillow`.
+
+```bash
+# 4행 6열 몬스터 시트 → assets/pet/ 에 monster_packed.png + monster_coordinate.json
+python3 .claude/skills/pixel-rendering/scripts/slice_sheet.py \
+  --sheet raw_monster.png --rows 4 --cols 6 --name monster --out-dir assets/pet
+```
+
+인자: `--sheet <png> --rows N --cols M [--name <prefix>] [--out-dir <dir>] [--padding 2] [--cell-w/--cell-h]`.
+시트가 rows/cols 로 정확히 안 나눠떨어지면 `--cell-w/--cell-h` 로 셀 크기를 직접 준다.
+
 ## 웹 CanvasKit (지금은 안 함 — 미래 참고용)
 
 웹에서 Skia 를 켜야 할 때만 본다. walkmon 현재 결정은 "웹 = null"이다(위).

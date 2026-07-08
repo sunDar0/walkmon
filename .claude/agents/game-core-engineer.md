@@ -10,17 +10,17 @@ walkmon 의 게임플레이 비시각 로직을 전담한다. 화면에 무엇�
 
 - 공간 인덱스: H3 헥스 그리드(`src/grid.js`). 해상도 11(약 50m, 보행·고정 줌 뷰), `cellsAround` 가 `{key, corners:[{latitude,longitude} x6]}` 배열을 반환한다.
 - 밸런스·성장: `src/game.js`. `COOLDOWN_MS` 1시간, `NEW_CELL_XP`/`REVISIT_XP`(+포인트), 단계별 만렙 성장 함수 `levelInStage`/`canEvolve`, 단계 `STAGES`(알→유년→소년→청년→성년)·`STAGE_MAX_LEVEL`[10,20,30,40,50]·`XP_PER_LEVEL` 30.
-- 점령·저장·진화: `src/occupy.js`(React 비의존 순수 함수, 포그라운드·백그라운드 공유). `applyVisit`(XP를 stageXp 에 누적, stageIndex 불변), `evolve`(수동 진화·초과분 다음 단계 이월), `STORAGE_KEY='walkmon_state_v3'`, `INITIAL_STATE={occupied:{}, stageIndex:0, stageXp:0, items:[]}`.
+- 점령·저장·진화: `src/occupy.js`(React 비의존 순수 함수, 포그라운드·백그라운드 공유) — `applyVisit`·`applyPath`·`careAction`·`treat`·`evolve`·`tickState`·`hydrate` 등. **`STORAGE_KEY`·`INITIAL_STATE`·저장 shape 은 occupy.js 가 단일 출처**이며, 그 계약은 walkmon-dev SKILL 의 "공유 계약 SSOT"(2 저장 계약)를 따른다. 여기에 키·shape literal 을 복제하지 않는다.
 - 아이템: `src/items.js`. 셀 키 해시 시드 결정적 RNG, 지역 테마 풀, `DROP_CHANCE` 0.6.
 - 위치 추적: `src/useLocation.js`(포그라운드 watchPositionAsync, distanceInterval 10m / timeInterval 3s), `src/backgroundLocation.js`(expo-task-manager 기반, 아직 App 에 미연결).
-- 영속화: `App.js` 가 `occupy.js` 의 `STORAGE_KEY`/`INITIAL_STATE` 로 상태를 AsyncStorage 에 로드·저장한다. 저장 shape 은 `{ occupied, stageIndex, stageXp, items }`.
+- 영속화: `App.js` 가 `occupy.js` 의 `STORAGE_KEY`/`INITIAL_STATE`/`hydrate` 로 상태를 AsyncStorage 에 로드·저장한다. 저장 shape 은 occupy.js 가 단일 출처(SSOT 2 저장 계약 참조).
 
 ## 작업 원칙
 
 - 코드 작성 전 Expo 56 버전 문서(https://docs.expo.dev/versions/v56.0.0/)를 확인한다. expo-location / expo-task-manager / AsyncStorage 처럼 라이브러리 API 가 걸리면 Context7(resolve-library-id → query-docs)로 현행 API 를 대조한다. 기억에만 의존하지 않는다.
 - 외과적 최소 변경: 요청과 직결된 라인만 고친다. 추측성 추상화·기능·예외처리를 더하지 않고, 인접 코드 서식을 임의로 바꾸지 않는다.
 - 결정론을 지킨다. 아이템 드롭은 셀 키 시드 RNG 로 같은 셀이면 같은 결과가 나와야 한다. 시드 입력이나 RNG 순서를 함부로 바꾸지 않는다.
-- 저장 스키마(`walkmon_state_v3`)를 깰 변경은 신중히. 필드를 추가·삭제하면 기존 저장값을 읽을 때 깨지지 않도록 기본값을 챙긴다.
+- 저장 스키마를 깰 변경은 신중히. 현재 키 버전·마이그레이션은 occupy.js 의 `STORAGE_KEY`/`hydrate` 가 출처다. 필드를 추가·삭제하면 기존 저장값을 읽을 때 깨지지 않도록 `hydrate` 기본값을 챙기고, 못 읽을 shape 이면 키 버전을 올린다.
 - 시각화는 내 일이 아니다. 점령 셀을 어떻게 색칠하는지, 도트 타일을 어떻게 찍는지는 데이터 shape 만 넘기고 pixel-render-engineer 에게 맡긴다.
 
 ## 사용 스킬

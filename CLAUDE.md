@@ -21,7 +21,7 @@ Expo Go 로는 못 띄운다(네이티브 모듈 때문). 개발 빌드가 필�
 
 ## 코드 지도
 
-엔트리는 `expo-router/entry` → `app/`. 게임 상태와 저장은 `App.js`(AsyncStorage, 키 `walkmon_state_v3`).
+엔트리는 `expo-router/entry` → `app/`. 게임 상태와 저장은 `App.js`(AsyncStorage; 저장 키·shape 은 `src/occupy.js` 의 `STORAGE_KEY`/`hydrate` 가 단일 출처).
 
 | 파일 | 역할 | 담당 스킬 / 에이전트 |
 |------|------|----------------------|
@@ -38,10 +38,10 @@ Expo Go 로는 못 띄운다(네이티브 모듈 때문). 개발 빌드가 필�
 
 ## 핵심 함정
 
-- **웹 분기**: `react-native-maps` 는 웹 미지원. `GameMap.web.js` / `PixelHexMap.web.js` 분기가 따로 있다. 네이티브 파일만 고치고 웹을 빠뜨리지 말 것.
+- **웹 분기**: `react-native-maps`·`react-native-skia` 는 웹 미지원. 네이티브 시각 컴포넌트마다 `.web.js` 짝이 따로 있다(PixelHexMap·CareRoom·FullMap·GameMap). 네이티브 파일만 고치고 웹 짝을 빠뜨리지 말 것. (전체 규약은 walkmon-dev SKILL 의 "공유 계약 SSOT".)
 - **h3-js 패치**: `patches/` 의 Hermes 패치를 `postinstall`(`patch-package`)이 자동 적용한다. `npm install` 이 패치를 못 붙이면 h3 호출이 깨진다.
 - **점령 동치성**: `occupy.js` 는 React 에 의존하지 않는 순수 함수다. 포그라운드(`App.js`)와 백그라운드가 같은 결과를 내야 하므로, 점령 규칙을 바꾸면 양쪽 경로를 함께 확인할 것.
-- **저장 호환성**: 저장 키는 `walkmon_state_v3`. 상태 shape(`{ occupied, stageIndex, stageXp, items }`)을 바꾸면 키 번호를 올려 옛 저장본을 무시(초기화)하거나 마이그레이션을 같이 처리할 것.
+- **저장 호환성**: 저장 키·상태 shape·마이그레이션은 `src/occupy.js`(`STORAGE_KEY`/`INITIAL_STATE`/`hydrate`)가 단일 출처다. shape 을 바꾸면 키 번호를 올려 옛 저장본을 무시(초기화)하거나 `hydrate` 마이그레이션을 같이 처리할 것. (상세는 walkmon-dev SKILL 의 "공유 계약 SSOT".)
 
 **변경 이력:**
 | 날짜 | 변경 내용 | 대상 | 사유 |
@@ -51,3 +51,4 @@ Expo Go 로는 못 띄운다(네이티브 모듈 때문). 개발 빌드가 필�
 | 2026-07-02 | 고정 줌 뷰 + 보드 배경(실제 지도 제거), res11(50m), 시야 400m, 단계별 만렙·수동 진화 성장 재작업(저장 v3) | 전체 | LOD 폐기 후 카메라·성장 모델 확정 |
 | 2026-07-02 | 하네스 정의(에이전트 3 + 스킬 4) drift 동기화 — PixelHexMap 렌더러·res11·단계별 만렙 성장·저장 v3 반영 | .claude/agents, .claude/skills | 코드 변경 후 정의가 옛 GameMap/sqrt/v1 을 가리켜 에이전트 오작성 위험 |
 | 2026-07-02 | 모델 tier 정책 반영 — walkmon-dev 의 "모두 opus" 못박기를 tier 기준으로 완화(현 3 에이전트는 코드생성/QA라 opus 유지) | skills/walkmon-dev | 메타 하네스 스킬의 역할별 opus/sonnet tier 도입 반영 |
+| 2026-07-08 | 하네스 개선 3건 — 에셋 슬라이싱 스크립트(pixel-rendering `scripts/slice_sheet.py`), 파괴적 플레이 시나리오+디버그 훅(expo-build-run §6 + App.js `__DEV__` 상태 전역), 계약 SSOT(walkmon-dev 신설, 에이전트·도메인 스킬 v3→v4 drift 제거) | .claude/skills, .claude/agents, App.js, CLAUDE.md | 외부 tower-defense 하네스 분석 반영 + 코드는 v4인데 문서가 v3 가리키던 진행 중 drift 정리 |

@@ -2,7 +2,6 @@ import {
   BlendMode,
   BlurMask,
   Canvas,
-  Circle,
   Fill,
   FilterMode,
   Group,
@@ -12,6 +11,8 @@ import {
   Picture,
   RoundedRect,
   Skia,
+  Text as SkiaText,
+  matchFont,
   useClock,
   useImage,
 } from "@shopify/react-native-skia";
@@ -165,7 +166,7 @@ const TILE_TYPE_BY_ROW = [
 // 도트 헥스 월드 중앙(플레이어 자리)에 성장 단계별 크리처를 그린다.
 // 4줄 = 속성 타입: 0=불(빨강), 1=물(파랑), 2=땅(갈색), 3=바람(초록 스프라이트는 임시 placeholder).
 // 6열: col0=속성아이콘, col1=알, col2=유년, col3=소년, col4=청년, col5=성년기(왼->오 점점 큼).
-const PET_ATLAS_SRC = require("../assets/pet/monster_packed.png");
+export const PET_ATLAS_SRC = require("../assets/pet/monster_packed.png");
 const PET_FRAMES = require("../assets/pet/monster_coordinate.json").frames;
 const PET_FRAMES_BY_NAME = {};
 for (const f of PET_FRAMES) PET_FRAMES_BY_NAME[f.name] = f;
@@ -181,7 +182,7 @@ const PET_STAGE_COL = { 알: 1, 유년: 2, 소년: 3, 청년: 4, 성년: 5 };
 // 더 낮게 깔고 싶으면 이 값만 낮춘다(예: 52 -> 펫 ≈ 0.8칸). 사용자 판단.
 // 모든 단계에 같은 배율 -> 단계가 작을수록 원본이 작아 자연히 작게 그려진다(성장감).
 // 스케일은 petType(row)마다 col5 원본 높이가 다를 수 있어 petPicture 안에서 row 별로 계산한다.
-const PET_TARGET_MAX_H = 68;
+export const PET_TARGET_MAX_H = 68;
 
 // --- 플레이어(트레이너) 스프라이트(player_packed.png) ---
 // 현재 위치 타일 중앙(펫이 서던 자리)에 트레이너를 세운다. 단일 프레임(sprite_0_0, 938×1659, 정면).
@@ -215,27 +216,31 @@ const HELD_ATTACH_H = 48; // 알이 붙어 있는 플레이어 가슴 높이(bak
 const SAD_TINT_COLOR = "#a7adc0"; // 옅은 회청색(곱하면 채도↓·약간 어둡게 = 풀죽은 톤)
 const SAD_DROOP_DY = 3; // px(bake), 부화 크리처를 살짝 아래로 내려 "처진" 느낌
 
-// --- 능동 소통(감정 ②·말풍선 ③·케어 손맛 ④) ---
-// emotion 우선순위: sick(health>0) > joy(케어 직후) > neutral.
-//  - sick: 시무룩(회청 틴트 + 처짐). joy/neutral: 처짐·틴트 없음. 배고픔 신호는 크리처가 아니라 말풍선(needMeter)이 전담.
-//  - joy·손맛은 careEvent(App 이 케어 성공 시 찍는 {action,at}) 로 clock 기반 판정(휘발, 저장 안 함).
-const JOY_MS = 1800; // 케어 직후 파티클(하트/반짝) 1회 재생 지속(ms). joy 감정도 이 창 동안.
+// --- 능동 소통(감정 ②·말풍선 ③) ---
+// 메인 그리드 emotion 우선순위: sick(health>0) > neutral. 케어 손맛·joy 연출은 케어 방(CareRoom) 전용이라
+// 메인 뷰에서는 하지 않는다(careEvent 를 소비하지 않음). sick=시무룩(회청 틴트 + 처짐). 배고픔 신호는
+// 크리처가 아니라 말풍선(needMeter)이 전담. 아래 JOY_MS·CARE_HEART_ACTIONS·CareParticle·HEART_SVG/SPARKLE_SVG
+// 등은 케어 방(CareRoom) 재사용을 위해 export 로만 유지한다(메인 컴포넌트는 참조하지 않음).
+const JOY_MS = 1800; // 케어 파티클(CareParticle) 1회 재생 지속(ms). 케어 방(CareRoom)에서 소비.
 // 케어 액션군 -> 파티클 종류. feed/snack/pet/play = 하트 팝 + 몸 통통 튐, wash/clean/poop = 반짝(sparkle, 튐 없음).
-const CARE_HEART_ACTIONS = new Set(["feed", "snack", "pet", "play"]);
-// 미터별 요구 색(App METER_META 와 동일: 포만 주황·행복 분홍·청결 청록). 말풍선 아이콘 색.
-const NEED_COLORS = { satiety: "#f59e0b", happiness: "#ec4899", cleanliness: "#06b6d4" };
-// 파티클 색(하트=분홍, 반짝=금색). 하트는 행복 톤, 반짝은 청결/반짝임 톤.
-const HEART_PARTICLE_COLOR = "#ff5c8a";
-const SPARKLE_PARTICLE_COLOR = "#ffd34d";
-const CARE_PARTICLE_COUNT = 5; // 팝 파티클 개수(고정 -> Hooks 순서 불변)
+// export: 케어 방(CareRoom)이 같은 파이프라인으로 방 안 크리처 반응을 재생하도록 공유.
+export const CARE_HEART_ACTIONS = new Set(["feed", "snack", "pet", "play"]);
 
-// 절차적 심볼 SVG(이모지 tofu 회피 — 시뮬레이터에서 확실히 렌더. 원점 중심, ~16px).
-// 말풍선/파티클 공용. Skia.Path.MakeFromSVGString 로 SkPath 로 굽는다(컴포넌트 useMemo, null 가드).
-const HEART_SVG =
+// --- 말풍선 이모지(확정) ---
+// Skia canvas 안 이모지(Skia Text + Apple Color Emoji)가 iOS 26.1 에서 컬러로 렌더됨을 실측 확정(p35/p36).
+// SpeechBubble 은 미터 요구를 절차적 도형이 아니라 이모지로 그린다(RN Text 건강코드 배지와 동일 톤).
+// needMeter -> 말풍선 이모지. satiety=밥, happiness=우는 고양이, cleanliness=빗자루.
+const BUBBLE_EMOJI = { satiety: "🍛", happiness: "😿", cleanliness: "🧹" };
+// 파티클 색(하트=분홍, 반짝=금색). 하트는 행복 톤, 반짝은 청결/반짝임 톤.
+export const HEART_PARTICLE_COLOR = "#ff5c8a";
+export const SPARKLE_PARTICLE_COLOR = "#ffd34d";
+export const CARE_PARTICLE_COUNT = 5; // 팝 파티클 개수(고정 -> Hooks 순서 불변)
+
+// 케어 손맛 파티클 심볼 SVG(원점 중심, ~16px). 하트=feed/snack/pet/play, 반짝=wash/clean/poop.
+// 메인 뷰·케어 방(CareRoom) 공용. Skia.Path.MakeFromSVGString 로 SkPath 로 굽는다(컴포넌트 useMemo, null 가드).
+export const HEART_SVG =
   "M0 -4 C-2 -9 -8 -8 -8 -3 C-8 1 -3 4 0 7 C3 4 8 1 8 -3 C8 -8 2 -9 0 -4 Z";
-const DROPLET_SVG =
-  "M0 -8 C4 -2 6 1 6 4 C6 8 3 10 0 10 C-3 10 -6 8 -6 4 C-6 1 -4 -2 0 -8 Z";
-const SPARKLE_SVG = "M0 -7 L2 -2 L7 0 L2 2 L0 7 L-2 2 L-7 0 L-2 -2 Z";
+export const SPARKLE_SVG = "M0 -7 L2 -2 L7 0 L2 2 L0 7 L-2 2 L-7 0 L-2 -2 Z";
 
 // 말풍선 규격(bake px). 크리처 머리 위에 뜨는 흰 라운드 rect + 아래 꼬리 삼각형 + 요구 심볼.
 const BUBBLE_W = 46;
@@ -292,6 +297,43 @@ function bodyMotion(clockV, dropStartV, hopStartV, petBaseY, zoom) {
     }
   }
   return { offsetY, squashX, squashY };
+}
+
+// 펫 스프라이트 베이크(공용) — 메인 헥스맵과 케어 방(CareRoom)이 같은 파이프라인을 쓰도록 추출.
+// atlas(SkImage) · stage(단계 문자열) · petType(row 0~3) · sad(시무룩 틴트) -> 바닥-중앙 원점(0,0) SkPicture.
+// row 별 성년기(col5) 높이 기준으로 PET_TARGET_MAX_H 에 맞춰 nearest 축소. sad 면 Modulate 틴트(알파 보존).
+export function bakePetPicture(petAtlas, stage, petType, sad) {
+  if (!petAtlas) return null;
+  const row = petType ?? 0;
+  const col = PET_STAGE_COL[stage] ?? PET_STAGE_COL.알;
+  const frame = PET_FRAMES_BY_NAME[`sprite_${row}_${col}`];
+  if (!frame) return null;
+  const maxFrame = PET_FRAMES_BY_NAME[`sprite_${row}_5`] || frame;
+  const petScale = PET_TARGET_MAX_H / maxFrame.h;
+  const dstW = Math.round(frame.w * petScale);
+  const dstH = Math.round(frame.h * petScale);
+  const left = -Math.round(dstW / 2);
+  const top = -dstH;
+  const recorder = Skia.PictureRecorder();
+  const canvas = recorder.beginRecording(Skia.XYWHRect(left, top, dstW, dstH));
+  const src = Skia.XYWHRect(frame.x, frame.y, frame.w, frame.h);
+  const dst = Skia.XYWHRect(left, top, dstW, dstH);
+  const paint = Skia.Paint();
+  paint.setAntiAlias(false);
+  if (sad) {
+    paint.setColorFilter(
+      Skia.ColorFilter.MakeBlend(Skia.Color(SAD_TINT_COLOR), BlendMode.Modulate),
+    );
+  }
+  canvas.drawImageRectOptions(
+    petAtlas,
+    src,
+    dst,
+    FilterMode.Nearest,
+    MipmapMode.Nearest,
+    paint,
+  );
+  return recorder.finishRecordingAsPicture();
 }
 
 // 미점령(시야 안) 칸은 검은 막으로 어둡게 덮는다. 점령 칸은 칠하지 않고 타일 원본 그대로 둔다
@@ -538,7 +580,7 @@ function FallingCell({ picture, clock, startMs, delay, dropHeight }) {
 // 케어 손맛 파티클 1개(④). 크리처 머리(anchor) 위에서 부채꼴로 흩어지며 떠올랐다 사라진다.
 // clock 기반 UI 스레드(React 리렌더 없음). startMs = careEvent 를 받은 clock 값(SharedValue).
 // index 로 각도·거리·지연을 결정(무작위 아님) -> Hooks 순서 불변(고정 개수). 월드 Group 안이라 줌/카메라 정합.
-function CareParticle({ clock, startMs, index, count, path, color, anchorX, anchorY }) {
+export function CareParticle({ clock, startMs, index, count, path, color, anchorX, anchorY }) {
   // 위쪽(-90°) 중심 부채꼴로 퍼짐. 가장자리 입자일수록 옆으로.
   const angle = -Math.PI / 2 + (index / (count - 1) - 0.5) * (Math.PI * 0.75);
   const dist = 24 + (index % 3) * 7;
@@ -567,10 +609,10 @@ function CareParticle({ clock, startMs, index, count, path, color, anchorX, anch
   );
 }
 
-// 머리 위 말풍선(③). 미터 요구(needMeter) 를 절차적 도형으로 표시 — satiety=주황 원, happiness=분홍 하트,
-// cleanliness=청록 물방울. 흰 라운드 rect + 아래 꼬리 삼각 + 요구 심볼. 부드러운 부유(bob) + 등장 페이드인.
+// 머리 위 말풍선(③). 미터 요구(needMeter) 를 이모지로 표시 — satiety=🍛, happiness=😿, cleanliness=🧹.
+// 흰 라운드 rect + 아래 꼬리 삼각 + 요구 이모지(Apple Color Emoji, 컬러). 부드러운 부유(bob) + 등장 페이드인.
 // startMs = 말풍선 등장 clock 값(SharedValue). 월드 Group 안이라 줌/카메라를 따라 크리처 머리에 붙는다.
-function SpeechBubble({ clock, startMs, needMeter, heartPath, dropletPath, anchorX, anchorY }) {
+function SpeechBubble({ clock, startMs, needMeter, anchorX, anchorY }) {
   // 꼬리 삼각형(아래 중앙 -> 머리 쪽). 컴포넌트 로컬(0,0 = 말풍선 좌상단) 좌표.
   const tailPath = useMemo(() => {
     const b = Skia.PathBuilder.Make();
@@ -592,8 +634,11 @@ function SpeechBubble({ clock, startMs, needMeter, heartPath, dropletPath, ancho
     const t = (clock.value - startMs.value) / BUBBLE_FADE_MS;
     return Math.min(1, Math.max(0, t)) * 0.97;
   });
-  const color = NEED_COLORS[needMeter] || "#9ca3af";
-  const icon = { translateX: BUBBLE_W / 2, translateY: BUBBLE_H / 2 };
+  // 시스템 이모지 폰트(Apple Color Emoji). Skia canvas 안 컬러 이모지 렌더용(iOS 26.1 실측 확정).
+  const emojiFont = useMemo(
+    () => matchFont({ fontFamily: "Apple Color Emoji", fontSize: 22 }),
+    [],
+  );
   return (
     <Group transform={transform}>
       <RoundedRect
@@ -606,19 +651,14 @@ function SpeechBubble({ clock, startMs, needMeter, heartPath, dropletPath, ancho
         opacity={opacity}
       />
       <Path path={tailPath} color="#ffffff" opacity={opacity} />
-      {needMeter === "satiety" && (
-        <Circle cx={BUBBLE_W / 2} cy={BUBBLE_H / 2} r={8} color={color} opacity={opacity} />
-      )}
-      {needMeter === "happiness" && heartPath && (
-        <Group transform={[icon]}>
-          <Path path={heartPath} color={color} opacity={opacity} />
-        </Group>
-      )}
-      {needMeter === "cleanliness" && dropletPath && (
-        <Group transform={[icon, { scale: 0.85 }]}>
-          <Path path={dropletPath} color={color} opacity={opacity} />
-        </Group>
-      )}
+      <Group opacity={opacity}>
+        <SkiaText
+          x={BUBBLE_W / 2 - 11}
+          y={BUBBLE_H / 2 + 8}
+          text={BUBBLE_EMOJI[needMeter] || "?"}
+          font={emojiFont}
+        />
+      </Group>
     </Group>
   );
 }
@@ -634,7 +674,6 @@ export default function PixelHexMap({
   newlyRevealed,
   health,
   needMeter,
-  careEvent,
 }) {
   const { width: W, height: H } = useWindowDimensions();
 
@@ -652,8 +691,13 @@ export default function PixelHexMap({
   // 최초/기본 줌 = 2링(19칸) fit(initialZoomForRing). ZOOM_MAX 고정이 아니라 화면에 맞춰 계산 -> 핀치 줌인 여유.
   const initialZoom = initialZoomForRing(W, H);
   const [zoom, setZoom] = useState(initialZoom);
-  const zoomRef = useRef(initialZoom); // 라이브 zoom(onEnd 에서 baseline 으로 커밋)
-  const baseZoomRef = useRef(initialZoom); // 직전 제스처 종료 시점의 배율(다음 핀치의 기준)
+  // 라이브 zoom·baseline 을 SharedValue 로 둔다. useRef(.current)를 render 중 생성되는 gesture 콜백에서
+  // 읽으면 react-hooks/refs + react-compiler 가 "Cannot access refs during render" 로 막는다(런타임 무해하나
+  // dev 토스트). SharedValue 는 그 룰 대상이 아니라 회피된다. 단 .value 직접 변이는 react-compiler 가
+  // "cannot modify" 로 막으므로 접근은 reanimated 권고대로 .get()/.set() 을 쓴다. 콜백은 runOnJS(true)라
+  // JS 스레드에서 값을 읽고 setZoom(React state)을 호출한다 — 값 흐름(제스처→zoom state→worldTransform) 그대로.
+  const zoomV = useSharedValue(initialZoom); // 라이브 zoom(onEnd 에서 baseline 으로 커밋)
+  const baseZoomV = useSharedValue(initialZoom); // 직전 제스처 종료 시점의 배율(다음 핀치의 기준)
   const pinchGesture = useMemo(
     () =>
       Gesture.Pinch()
@@ -661,23 +705,25 @@ export default function PixelHexMap({
         .onUpdate((e) => {
           const next = Math.min(
             ZOOM_MAX,
-            Math.max(ZOOM_MIN, baseZoomRef.current * e.scale),
+            Math.max(ZOOM_MIN, baseZoomV.get() * e.scale),
           );
-          zoomRef.current = next;
+          zoomV.set(next);
           setZoom(next);
         })
         .onEnd(() => {
-          baseZoomRef.current = zoomRef.current;
+          baseZoomV.set(zoomV.get());
         }),
-    [],
+    [baseZoomV, zoomV],
   );
 
   // --- 드래그 팬(둘러보기) 상태 ---
-  // panX/panY = 화면 픽셀 오프셋(지속). 핀치 zoom 과 같은 결로 React state 로 구동한다.
-  // basePanRef = 직전 제스처 종료 시점의 오프셋(다음 드래그의 기준). 핀치 baseZoomRef 와 동일 패턴.
+  // panX/panY = 화면 픽셀 오프셋(지속, SharedValue). 팬은 UI 스레드 값으로 월드/펫을 함께 민다.
   const panX = useSharedValue(0);
   const panY = useSharedValue(0);
-  const basePanRef = useRef({ x: 0, y: 0 });
+  // basePan = 직전 제스처 종료 시점의 오프셋(다음 드래그의 기준). useRef 대신 SharedValue 로 둬
+  // render 중 gesture 콜백의 ref 접근 경고(react-hooks/refs)를 피한다. panX/panY 와 동일 결.
+  const basePanX = useSharedValue(0);
+  const basePanY = useSharedValue(0);
 
   // --- 카메라 / 뷰 모드 상태 ---
   // mode: 'player'(카메라가 플레이어를 텀 두고 추적, 줌 피벗=캐릭터) | 'free'(드래그 둘러보기,
@@ -720,17 +766,15 @@ export default function PixelHexMap({
         .onUpdate((e) => {
           // 누적 오프셋 = 기준 + 이번 제스처 누적 이동량. SharedValue 직접 변이(React 리렌더 없음)
           // -> 펫(worklet)·월드(DerivedValue)가 같은 UI 스레드 값을 읽어 드래그 중 떨림이 없다.
-          panX.value = basePanRef.current.x + e.translationX;
-          panY.value = basePanRef.current.y + e.translationY;
+          panX.set(basePanX.get() + e.translationX);
+          panY.set(basePanY.get() + e.translationY);
         })
         .onEnd((e) => {
           // 종료값을 다음 드래그의 기준으로 커밋.
-          basePanRef.current = {
-            x: basePanRef.current.x + e.translationX,
-            y: basePanRef.current.y + e.translationY,
-          };
+          basePanX.set(basePanX.get() + e.translationX);
+          basePanY.set(basePanY.get() + e.translationY);
         }),
-    [],
+    [panX, panY, basePanX, basePanY],
   );
 
   // 핀치 줌과 드래그 팬을 동시 인식(둘 다 활성). GestureDetector 에는 이 합성 제스처를 넘긴다.
@@ -743,12 +787,13 @@ export default function PixelHexMap({
   // 카메라를 플레이어로 되돌리는 withTiming 은 아래 follow effect 가 mode 변경을 받아 처리한다.
   // 줌은 요청대로 1.00 으로 스냅(상태·refs 를 함께 맞춰 다음 핀치 기준도 1.0).
   const recenter = () => {
-    basePanRef.current = { x: 0, y: 0 };
-    panX.value = 0;
-    panY.value = 0;
+    basePanX.set(0);
+    basePanY.set(0);
+    panX.set(0);
+    panY.set(0);
     setZoom(1);
-    zoomRef.current = 1;
-    baseZoomRef.current = 1;
+    zoomV.set(1);
+    baseZoomV.set(1);
     setMode("player");
   };
 
@@ -1021,23 +1066,8 @@ export default function PixelHexMap({
     hopStart.value = clock.value;
   }, [coords, clock, hopStart]);
 
-  // --- 케어 손맛(④) + 말풍선(③) 절차적 심볼 ---
-  // 원점 중심 SkPath 를 1회만 굽는다(Skia.Path.MakeFromSVGString, null 가드). 말풍선/파티클 공용.
-  const heartPath = useMemo(() => Skia.Path.MakeFromSVGString(HEART_SVG), []);
-  const dropletPath = useMemo(() => Skia.Path.MakeFromSVGString(DROPLET_SVG), []);
-  const sparklePath = useMemo(() => Skia.Path.MakeFromSVGString(SPARKLE_SVG), []);
-
-  // 케어 연출 시작 clock(SharedValue) + 파티클 종류(state). careEvent 가 오면 clock 을 찍어 파티클을 재생하고,
-  // 하트군(feed/snack/pet/play)은 몸 통통 튐(hopStart 리셋)도 함께 준다. wash 계열은 반짝만(튐 없음).
-  const careStartMs = useSharedValue(-1e9);
-  const [careKind, setCareKind] = useState(null); // 'heart' | 'sparkle' | null(케어 전)
-  useEffect(() => {
-    if (!careEvent) return;
-    careStartMs.value = clock.value;
-    const heart = CARE_HEART_ACTIONS.has(careEvent.action);
-    setCareKind(heart ? "heart" : "sparkle");
-    if (heart) hopStart.value = clock.value; // 하트군만 즉각 점프/냠냠(통통 튐)
-  }, [careEvent, clock, careStartMs, hopStart]);
+  // 케어 손맛·joy 연출(파티클/통통 튐)은 케어 방(CareRoom) 전용이라 메인 그리드에서는 하지 않는다.
+  // careEvent 소비·CareParticle 렌더·joy 감정 분기를 제거했다(연출 누출 방지). 관련 export 상수는 CareRoom 이 쓰도록 유지.
 
   // 말풍선 등장 시각(SharedValue). needMeter 가 새로 생기면(또는 다른 미터로 바뀌면) 페이드인 기준시각 갱신.
   const bubbleStartMs = useSharedValue(-1e9);
@@ -1091,8 +1121,8 @@ export default function PixelHexMap({
       // 이후 사용자가 핀치로 바꾸는 건 그대로(일반 이동 reveal 은 isIntro=false 라 줌 안 건드림).
       const fitZoom = initialZoomForRing(W, H);
       setZoom(fitZoom);
-      zoomRef.current = fitZoom;
-      baseZoomRef.current = fitZoom;
+      zoomV.set(fitZoom);
+      baseZoomV.set(fitZoom);
       setIntroPetPending(true); // 그리드 낙하 동안 캐릭터 숨김
       setTimeout(() => {
         // 그리드 안착 -> 캐릭터 낙하 시작(순서 보장). clock.value 를 JS 에서 읽어 낙하 기준시각으로.
@@ -1100,7 +1130,7 @@ export default function PixelHexMap({
         setIntroPetPending(false);
       }, gridSettleMs);
     }
-  }, [newlyRevealed, clock, revealedCells, petDropStartMs, W, H]);
+  }, [newlyRevealed, clock, revealedCells, petDropStartMs, W, H, baseZoomV, zoomV]);
 
   // --- 플레이어(트레이너) transform ---
   // 타일 중앙(petBase)에 발밑 앵커로 선다. 방향 변형이 없어 좌우는 수평 반전(facingRight)만.
@@ -1166,42 +1196,12 @@ export default function PixelHexMap({
   // 펫 크리처 스프라이트를 로컬 원점(바닥-중앙 = 0,0)에 베이크한다. stage 가 바뀌면 다른 단계
   // 프레임으로 재베이크 -> 진화가 화면에 보인다. drawImageRectOptions 로 nearest 강제(픽셀 선명).
   // 위치/좌우 반전은 렌더 시 Group transform 으로 입혀 deps 를 작게(petAtlas, stage) 유지한다.
-  const petPicture = useMemo(() => {
-    if (!petAtlas) return null;
-    const row = petType ?? 0; // 계약: petType prop(0~3) = 아틀라스 row. 미전달/undefined 시 0(불).
-    const col = PET_STAGE_COL[stage] ?? PET_STAGE_COL.알;
-    const frame = PET_FRAMES_BY_NAME[`sprite_${row}_${col}`];
-    if (!frame) return null;
-    // 스케일 = 같은 row 의 성년기(col5) 높이 기준(row 마다 원본 높이가 다를 수 있어 row 별 계산).
-    const maxFrame = PET_FRAMES_BY_NAME[`sprite_${row}_5`] || frame;
-    const petScale = PET_TARGET_MAX_H / maxFrame.h;
-    const dstW = Math.round(frame.w * petScale);
-    const dstH = Math.round(frame.h * petScale);
-    // 바닥-중앙을 원점(0,0)에: 좌 = -dstW/2, 위 = -dstH -> 발이 원점, 위로 솟아 칸에 "선" 느낌.
-    const left = -Math.round(dstW / 2);
-    const top = -dstH;
-    const recorder = Skia.PictureRecorder();
-    const canvas = recorder.beginRecording(Skia.XYWHRect(left, top, dstW, dstH));
-    const src = Skia.XYWHRect(frame.x, frame.y, frame.w, frame.h);
-    const dst = Skia.XYWHRect(left, top, dstW, dstH);
-    const paint = Skia.Paint();
-    paint.setAntiAlias(false);
-    // 시무룩: 색필터(Modulate=픽셀×틴트)로 톤을 눌러 채도↓·약간 어둡게. 스프라이트 알파 보존.
-    if (sad) {
-      paint.setColorFilter(
-        Skia.ColorFilter.MakeBlend(Skia.Color(SAD_TINT_COLOR), BlendMode.Modulate),
-      );
-    }
-    canvas.drawImageRectOptions(
-      petAtlas,
-      src,
-      dst,
-      FilterMode.Nearest,
-      MipmapMode.Nearest,
-      paint,
-    );
-    return recorder.finishRecordingAsPicture();
-  }, [petAtlas, stage, petType, sad]);
+  // 발밑 앵커(바닥-중앙 원점) 크리처 스프라이트. 케어 방과 공용인 bakePetPicture 로 굽는다(중복 제거).
+  // 위치/좌우 반전은 렌더 시 Group transform 으로 입혀 deps 를 작게(petAtlas, stage, petType, sad) 유지한다.
+  const petPicture = useMemo(
+    () => bakePetPicture(petAtlas, stage, petType, sad),
+    [petAtlas, stage, petType, sad],
+  );
 
   // 플레이어(트레이너) 스프라이트를 로컬 원점(바닥-중앙 = 0,0)에 베이크한다. 단일 프레임이라 stage 무관 —
   // atlas 로드 시 한 번만 계산. 펫과 동일 파이프라인(발밑 앵커, nearest 강제). 높이 = PLAYER_TARGET_H.
@@ -1343,42 +1343,19 @@ export default function PixelHexMap({
               </Group>
             )}
 
-            {/* ③ 머리 위 말풍선(미터 요구): 배고픔·심심·꼬질을 절차적 심볼로. 상단바 건강배지(병)와 다른 신호.
+            {/* ③ 머리 위 말풍선(미터 요구): 배고픔·심심·꼬질을 이모지로. 상단바 건강배지(병)와 다른 신호.
                 needMeter 있고 알 단계 아닐 때만. 값이 회복돼 needMeter 가 null 이 되면 사라진다. */}
             {showBubble && bakeAnchor && !introPetPending && (
               <SpeechBubble
                 clock={clock}
                 startMs={bubbleStartMs}
                 needMeter={needMeter}
-                heartPath={heartPath}
-                dropletPath={dropletPath}
                 anchorX={headAnchorX}
                 anchorY={headAnchorY}
               />
             )}
 
-            {/* ④ 케어 손맛 파티클: careEvent 후 JOY_MS 동안 하트(feed/snack/pet/play)/반짝(wash/clean/poop) 팝.
-                clock 기반이라 창 밖에선 opacity 0(항상 마운트, 재생 시에만 보임). 하트군은 몸 통통 튐도 함께. */}
-            {careKind &&
-              bakeAnchor &&
-              !introPetPending &&
-              Array.from({ length: CARE_PARTICLE_COUNT }).map((_, i) => (
-                <CareParticle
-                  key={i}
-                  clock={clock}
-                  startMs={careStartMs}
-                  index={i}
-                  count={CARE_PARTICLE_COUNT}
-                  path={careKind === "heart" ? heartPath : sparklePath}
-                  color={
-                    careKind === "heart"
-                      ? HEART_PARTICLE_COLOR
-                      : SPARKLE_PARTICLE_COLOR
-                  }
-                  anchorX={headAnchorX}
-                  anchorY={headAnchorY}
-                />
-              ))}
+            {/* 케어 손맛 파티클(④)은 케어 방(CareRoom)에서만 재생한다 — 메인 그리드에서는 제거(연출 누출 방지). */}
           </Group>
           </Group>
         </Canvas>

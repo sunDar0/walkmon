@@ -8,11 +8,13 @@ import {
   Animated,
   Vibration,
   Platform,
+  useWindowDimensions,
 } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 import PixelHexMap, { latticeDiskKeys } from './src/PixelHexMap';
+import CareRoom from './src/CareRoom';
 import FullMap from './src/FullMap';
 
 import { useLocation } from './src/useLocation';
@@ -65,14 +67,32 @@ const METER_META = [
 const METER_LABEL = { satiety: '포만', happiness: '행복', cleanliness: '청결' };
 // 미터 낮음 신호(다마고치 신호등) 임계. 이하면 게이지/도트를 빨강 계열로.
 const LOW_METER_RED = '#ef4444';
-// 케어 시트 높이(슬라이드업 오프스크린 거리 계산용).
-const SHEET_HEIGHT = 300;
+// 건강코드 문자열 -> 이모지(UI 표시 전용). game.js HEALTH_CODES 9종과 1:1.
+// 코드 문자열 자체는 game-core SSOT(게임 로직·저장) 그대로 두고, 화면에만 이모지를 얹는다.
+// iOS 26.1 에서 RN Text 컬러 이모지 렌더 확정(p35 실측). 배지/치료 칩(팝오버)에서 코드명과 함께 표시.
+const HEALTH_EMOJI = {
+  쇠약: '😫',
+  어지럼: '😵',
+  영양실조: '🦴',
+  우울: '😢',
+  외로움: '👤',
+  무기력: '🛌',
+  가려움: '🦟',
+  악취: '🤢',
+  질병: '🤒',
+};
+// 상단 케어 패널 높이 폴백(px). onLayout 측정 전 첫 프레임의 위쪽 슬라이드 거리·하단 패널 top 기준.
+const CARE_TOP_FALLBACK = 320;
 // 진화 CTA 알약 높이(evolveBtn: paddingVertical 10×2 + 텍스트 ≈ 44). 팝오버를 CTA 아래로 밀 때 쓴다.
 const EVOLVE_CTA_H = 44;
 // 상단바 아래 배치 기본 간격(px). 팝오버/진화 CTA 를 상단바 실측 하단에서 이만큼 띄운다.
 const BELOW_BAR_GAP = 8;
 
 export default function App() {
+  // 하단 케어 패널(아래→위 슬라이드업)의 오프스크린 거리 계산용 화면 높이.
+  const { height: winH } = useWindowDimensions();
+  // 상단 케어 패널 실측 높이(px). onLayout 으로 재서 (1)위쪽 슬라이드 거리 (2)하단 패널 top(=방 아래 경계=결합선)을 잡는다.
+  const [careTopH, setCareTopH] = useState(0);
   const [coords, setCoords] = useState(null);
   const [currentKey, setCurrentKey] = useState(null);
   // 게임 상태 단일 진실원. occupied/stageIndex/stageXp/items 를 한 객체로 묶어 포그라운드·백그라운드가 같은 shape 을 쓴다.
@@ -112,6 +132,9 @@ export default function App() {
   // 케어 시트 슬라이드 애니메이션(0=닫힘/오프스크린, 1=열림). RN Animated 로 새 의존성 없이 처리.
   const careAnim = useRef(new Animated.Value(0)).current;
   const openCare = useCallback(() => {
+    // 방 재열림 시 직전 careEvent 로 파티클이 다시 재생되지 않게 먼저 비운다(버그2).
+    // 열린 상태에서 누른 케어는 doCare 가 새 {action,at} 을 찍어 정상 재생된다(연타 포함).
+    setCareEvent(null);
     setCareOpen(true);
     Animated.timing(careAnim, { toValue: 1, duration: 220, useNativeDriver: true }).start();
   }, [careAnim]);
@@ -313,9 +336,15 @@ export default function App() {
     if (!boostAvailable && apBoost) setApBoost(false);
   }, [boostAvailable, apBoost]);
 
-  const careTranslateY = careAnim.interpolate({
+  // 2패널 결합 애니메이션(같은 careAnim 소스, 반대 방향). 열림 시 상단은 위에서 아래로 펼쳐지고
+  // 하단은 아래에서 위로 올라와 방 아래 경계에서 맞붙는다. 둘 다 useNativeDriver(translateY) 로 처리.
+  const careTopTranslate = careAnim.interpolate({
     inputRange: [0, 1],
-    outputRange: [SHEET_HEIGHT + 40, 0],
+    outputRange: [-(careTopH || CARE_TOP_FALLBACK), 0], // 위로 접힘(자기 높이만큼 위로) -> 제자리
+  });
+  const careBottomTranslate = careAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [winH, 0], // 화면 아래로 완전히 내려가 있다 -> 제자리로 슬라이드업
   });
 
   return (
@@ -333,7 +362,6 @@ export default function App() {
           newlyRevealed={reveal.newly}
           health={gameState.health}
           needMeter={needMeter}
-          careEvent={careEvent}
         />
       ) : (
         <FullMap occupiedKeys={Object.keys(gameState.occupied)} />
@@ -341,7 +369,7 @@ export default function App() {
 
       {/* 상단 얇은 상태 표시줄(기존 큰 카드 대체). 화면 최상단 가장자리에 붙어 캐릭터를 안 가린다.
           1행: 단계·Lv + XP 진행 바 + AP pill. 2행: 미터 3종 아이콘+게이지(낮으면 신호등 빨강). */}
-      {activeView === 'play' && (
+      {activeView === 'play' && !careOpen && (
         <View
           style={styles.statusBar}
           pointerEvents="box-none"
@@ -398,7 +426,9 @@ export default function App() {
                 style={styles.healthBadge}
                 onPress={() => setHealthOpen((o) => !o)}
               >
-                <Text style={styles.healthBadgeText}>! {health.length}</Text>
+                <Text style={styles.healthBadgeText}>
+                  {HEALTH_EMOJI[health[0]] || '!'} {health.length}
+                </Text>
               </Pressable>
             )}
           </View>
@@ -430,7 +460,7 @@ export default function App() {
                 onPress={() => setGameState((prev) => treat(prev, code, Date.now()))}
               >
                 <Text style={styles.chipText}>
-                  {code}
+                  {HEALTH_EMOJI[code] || ''} {code}
                   {canTreat ? ' ✕' : ''}
                 </Text>
               </Pressable>
@@ -458,35 +488,101 @@ export default function App() {
         </Pressable>
       )}
 
-      {/* 케어 시트(슬라이드업). 백드롭 + 7액션 그리드. 상단 전역 AP 부스트 토글로 일반/AP 갈래 단순화. */}
-      {careOpen && <Pressable style={styles.backdrop} onPress={closeCare} />}
+      {/* 케어 화면 = 위·아래 두 패널이 방 아래 경계에서 맞붙는 결합 구조.
+          상단 패널: 얇은 상태바가 아래로 확장(미터 3종 + 정육면체 방). 하단 패널: 케어 7액션(+ AP 부스트) 슬라이드업.
+          두 패널은 careAnim 한 소스로 위/아래 반대 방향에서 와 결합한다. 백드롭은 결합 전(슬라이드 중) 뒤 화면을 덮는다. */}
+      {careOpen && (
+        <Animated.View pointerEvents="none" style={[styles.backdrop, { opacity: careAnim }]} />
+      )}
+
+      {/* 상단 패널: 화면 최상단에 앵커, 자기 높이만큼 위→아래로 펼쳐짐. onLayout 높이 = 하단 패널 결합선. */}
       {careOpen && (
         <Animated.View
-          style={[styles.careSheet, { transform: [{ translateY: careTranslateY }] }]}
+          style={[styles.careTopPanel, { transform: [{ translateY: careTopTranslate }] }]}
+          onLayout={(e) => setCareTopH(e.nativeEvent.layout.height)}
         >
-          <View style={styles.sheetHandle} />
           <View style={styles.sheetHeader}>
-            <Text style={styles.sheetTitle}>케어 · AP {ap}</Text>
+            <Text style={styles.sheetTitle}>돌봄 방</Text>
             <View style={styles.sheetHeaderRight}>
-              <Pressable
-                style={[
-                  styles.boostToggle,
-                  effectiveBoost && styles.boostToggleOn,
-                  !boostAvailable && styles.boostToggleDisabled,
-                ]}
-                disabled={!boostAvailable}
-                onPress={() => setApBoost((b) => !b)}
-              >
-                <Text style={[styles.boostToggleText, effectiveBoost && styles.boostToggleTextOn]}>
-                  AP 부스트 {effectiveBoost ? 'ON' : 'OFF'}
-                </Text>
-              </Pressable>
+              <View style={styles.apPill}>
+                <Text style={styles.apPillText}>AP {ap}</Text>
+              </View>
               <Pressable style={styles.closeBtn} onPress={closeCare}>
                 <Text style={styles.closeBtnText}>✕</Text>
               </Pressable>
             </View>
           </View>
 
+          {/* 미터 3종 확장(라벨 + 게이지 + %). 값<40 이면 신호등 빨강(상단바와 동일 규칙). */}
+          <View style={styles.roomMeters}>
+            {METER_META.map((mm) => {
+              const v = Math.round(meters[mm.key] ?? 0);
+              const low = v < HEALTH_THRESHOLD;
+              const col = low ? LOW_METER_RED : mm.color;
+              return (
+                <View key={mm.key} style={styles.roomMeterRow}>
+                  <Text style={styles.roomMeterLabel}>{mm.label}</Text>
+                  <View style={styles.roomMeterTrack}>
+                    <Animated.View
+                      style={[
+                        styles.roomMeterFill,
+                        {
+                          width: meterAnims[mm.key].interpolate({
+                            inputRange: [0, 100],
+                            outputRange: ['0%', '100%'],
+                            extrapolate: 'clamp',
+                          }),
+                          backgroundColor: col,
+                        },
+                      ]}
+                    />
+                  </View>
+                  <Text style={[styles.roomMeterPct, { color: col }]}>{v}%</Text>
+                </View>
+              );
+            })}
+          </View>
+
+          {/* 방은 상단 패널에 속한다. 절차적 정육면체 내부 + 크리처 산책(웹은 CareRoom.web=null). */}
+          <View style={styles.roomWrap}>
+            <CareRoom
+              stage={stage}
+              petType={gameState.petType}
+              sad={health.length > 0}
+              careEvent={careEvent}
+            />
+          </View>
+        </Animated.View>
+      )}
+
+      {/* 하단 패널: 상단 패널 아래 경계(careTopH)에서 시작해 화면 하단까지. 아래→위 슬라이드업으로 상단과 결합. */}
+      {careOpen && (
+        <Animated.View
+          style={[
+            styles.careBottomPanel,
+            { top: careTopH || CARE_TOP_FALLBACK, transform: [{ translateY: careBottomTranslate }] },
+          ]}
+        >
+          <View style={styles.sheetHandle} />
+
+          {/* AP 부스트 토글: ON 이면 AP 소모·정상 XP, OFF 면 무AP·XP 1/3. */}
+          <View style={styles.boostRow}>
+            <Pressable
+              style={[
+                styles.boostToggle,
+                effectiveBoost && styles.boostToggleOn,
+                !boostAvailable && styles.boostToggleDisabled,
+              ]}
+              disabled={!boostAvailable}
+              onPress={() => setApBoost((b) => !b)}
+            >
+              <Text style={[styles.boostToggleText, effectiveBoost && styles.boostToggleTextOn]}>
+                AP 부스트 {effectiveBoost ? 'ON' : 'OFF'}
+              </Text>
+            </Pressable>
+          </View>
+
+          {/* 케어 7액션(기능 그대로) */}
           <View style={styles.careGrid}>
             {Object.keys(CARE_ACTIONS).map((key) => {
               const def = CARE_ACTIONS[key];
@@ -674,7 +770,7 @@ const styles = StyleSheet.create({
     elevation: 6,
   },
   careFabText: { fontSize: 16, color: '#ffffff', fontWeight: '800' },
-  // --- 케어 시트(슬라이드업) ---
+  // --- 케어 2패널 결합(상단 확장 + 하단 슬라이드업) ---
   backdrop: {
     position: 'absolute',
     top: 0,
@@ -683,30 +779,50 @@ const styles = StyleSheet.create({
     bottom: 0,
     backgroundColor: 'rgba(0,0,0,0.35)',
   },
-  careSheet: {
+  // 상단 패널: 최상단 앵커, 위→아래로 펼쳐짐. 방 아래 경계까지가 이 패널(높이 = 결합선).
+  // 반투명 흰(0.96)으로 뒤 dim 백드롭이 외곽 라운드 모서리에서 비쳐 "떠 있는 카드"로 읽힌다.
+  // 위쪽 모서리만 라운드(아래 = 하단 패널과 맞붙는 이음새라 각짐 유지). 그림자는 상단 패널에만(단일,
+  // 이음새 이중 그림자 방지). 하단 패널은 같은 톤 배경으로 이어붙어 하나의 카드가 된다.
+  careTopPanel: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingTop: 52,
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    zIndex: 20,
+    shadowColor: '#000',
+    shadowOpacity: 0.15,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  // 하단 패널: 결합선(top=careTopH)에서 화면 하단까지. 아래→위 슬라이드업.
+  // 상단과 같은 반투명 톤 + 아래쪽 모서리만 라운드(위 = 이음새라 각짐). 그림자 없음(이음새 이중 그림자 방지).
+  careBottomPanel: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: 0,
-    height: SHEET_HEIGHT,
-    backgroundColor: '#ffffff',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    borderBottomLeftRadius: 20,
+    borderBottomRightRadius: 20,
     paddingHorizontal: 16,
-    paddingTop: 10,
+    paddingTop: 8,
     paddingBottom: 28,
-    shadowColor: '#000',
-    shadowOpacity: 0.2,
-    shadowRadius: 12,
-    elevation: 8,
+    zIndex: 20,
   },
+  boostRow: { flexDirection: 'row', justifyContent: 'flex-end', marginBottom: 10 },
   sheetHandle: {
     width: 40,
     height: 4,
     borderRadius: 2,
     backgroundColor: '#d1d5db',
     alignSelf: 'center',
-    marginBottom: 12,
+    marginBottom: 10,
   },
   sheetHeader: {
     flexDirection: 'row',
@@ -736,6 +852,26 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   closeBtnText: { fontSize: 15, color: '#6b7280', fontWeight: '700' },
+  // --- 돌봄 방: 상단 패널 미터 확장 + 방 ---
+  roomMeters: { marginBottom: 10 },
+  roomMeterRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 6 },
+  roomMeterLabel: { width: 40, fontSize: 13, fontWeight: '700', color: '#374151' },
+  roomMeterTrack: {
+    flex: 1,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#e5e7eb',
+    overflow: 'hidden',
+    marginHorizontal: 8,
+  },
+  roomMeterFill: { height: '100%', borderRadius: 5 },
+  roomMeterPct: { width: 40, fontSize: 12, fontWeight: '700', textAlign: 'right' },
+  roomWrap: {
+    height: 150,
+    borderRadius: 14,
+    overflow: 'hidden',
+    backgroundColor: '#cbb98d',
+  },
   careGrid: { flexDirection: 'row', flexWrap: 'wrap' },
   careCard: {
     width: '22%',

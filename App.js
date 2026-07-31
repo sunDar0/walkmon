@@ -110,6 +110,8 @@ export default function App() {
   const [activeView, setActiveView] = useState('play');
   // 케어 시트(슬라이드업) 열림 여부. 평소엔 하단 단일 케어 FAB 만, 탭하면 시트가 올라온다.
   const [careOpen, setCareOpen] = useState(false);
+  // 케어 버튼 쿨다운 카운트다운용 1초 클록. 시트 열림 동안만 돌아 버튼의 남은 시간을 갱신한다(닫히면 멈춤).
+  const [careNow, setCareNow] = useState(() => Date.now());
   // 전역 AP 부스트 토글. ON 이면 케어 액션 = AP 소모·정상 XP, OFF 면 무AP·XP 1/3. AP 부족 시 자동 OFF.
   const [apBoost, setApBoost] = useState(false);
   // 건강코드 팝오버(상단바 경고 배지 탭) 표시 여부. 열리면 코드 칩(탭=개별 치료)을 보여준다.
@@ -350,12 +352,24 @@ export default function App() {
   // 케어 실행 + 즉각 손맛(④): 상태 적용 -> 연출 이벤트 신호 -> 짧은 진동(웹 no-op 가드). game-core 시그니처 그대로.
   const doCare = useCallback(
     (key) => {
+      // 미터 만땅 또는 쿨다운 중이면 careAction 이 무보상으로 거부하므로, 손맛 연출(파티클·진동)도
+      // 내지 않는다(없는 보상을 준 것처럼 안 보이게). 버튼은 흐림+"가득"/카운트다운으로 이미 신호.
+      const p = previewCare(gameState, key, effectiveBoost, Date.now());
+      if (p.wasted || p.cooldownRemainingMs > 0) return;
       setGameState((prev) => careAction(prev, key, effectiveBoost, Date.now()));
       setCareEvent({ action: key, at: Date.now() });
       if (Platform.OS !== 'web') Vibration.vibrate(15);
     },
-    [effectiveBoost],
+    [effectiveBoost, gameState],
   );
+
+  // 케어 시트 열림 동안만 1초 클록을 돌려 버튼 쿨다운 카운트다운을 갱신한다. 닫히면 인터벌 정리.
+  useEffect(() => {
+    if (!careOpen) return;
+    setCareNow(Date.now());
+    const id = setInterval(() => setCareNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [careOpen]);
 
   // AP 부족해지면 부스트 토글을 강제로 끈다(음수 AP·오해 방지). occupy.careAction 이 이미 방어하지만 UI 도 정합.
   useEffect(() => {
@@ -613,7 +627,13 @@ export default function App() {
             {Object.keys(CARE_ACTIONS).map((key) => {
               const def = CARE_ACTIONS[key];
               // 프리뷰 XP 는 현재 부스트 상태 기준(effectiveBoost). ON 이면 정상, OFF 면 1/3.
-              const xp = previewCare(gameState, key, effectiveBoost).xp;
+              // 거부 상태(만땅=wasted / 쿨다운=cooldownRemainingMs)면 버튼을 흐림 처리하고 라벨을
+              // "가득" 또는 남은 시간으로 바꿔 정직하게 신호. careNow(1초 클록)로 카운트다운 갱신.
+              const preview = previewCare(gameState, key, effectiveBoost, careNow);
+              const xp = preview.xp;
+              const cooling = preview.cooldownRemainingMs > 0;
+              const blocked = preview.wasted || cooling;
+              const coolSec = Math.ceil(preview.cooldownRemainingMs / 1000);
               const meterStr = Object.entries(def.meters)
                 .map(([m, dv]) => `${METER_LABEL[m]}+${dv}`)
                 .join(' ');
@@ -624,13 +644,21 @@ export default function App() {
               return (
                 <Pressable
                   key={key}
-                  style={styles.careCard}
+                  style={[styles.careCard, blocked && styles.careCardWasted]}
                   onPress={() => doCare(key)}
                 >
                   <View style={[styles.careDot, { backgroundColor: dotColor }]} />
                   <Text style={styles.careLabel}>{def.label}</Text>
                   <Text style={styles.careMeter}>{meterStr}</Text>
-                  <Text style={styles.careXp}>+{xp} XP</Text>
+                  <Text style={styles.careXp}>
+                    {preview.wasted
+                      ? '가득'
+                      : cooling
+                        ? coolSec >= 60
+                          ? `${Math.ceil(coolSec / 60)}분`
+                          : `${coolSec}초`
+                        : `+${xp} XP`}
+                  </Text>
                 </Pressable>
               );
             })}
@@ -912,6 +940,7 @@ const styles = StyleSheet.create({
   careLabel: { fontSize: 13, fontWeight: '700', color: '#111827', marginTop: 4 },
   careMeter: { fontSize: 11, color: '#6b7280', marginTop: 2, textAlign: 'center' },
   careXp: { fontSize: 11, color: '#7c3aed', fontWeight: '700', marginTop: 2 },
+  careCardWasted: { opacity: 0.4 }, // 거부 상태(미터 만땅/쿨다운): 눌러도 무보상이라 흐리게
   // --- 유틸(좌하단 코너): 지도 토글 + 그 위 작은 초기화 ---
   resetBtn: {
     position: 'absolute',

@@ -152,6 +152,8 @@ export default function App() {
   // 저장소에서 게임 상태를 읽어온다. v4 우선, 없으면 v3 저장본을 hydrate 로 마이그레이션(backfill).
   // 로드 직후 tick 으로 오프라인 경과(미터 감소·건강코드)를 즉시 정산한다. v3→v4 는 타임스탬프가
   // now 로 채워져 경과 0(미터 가득)에서 출발한다.
+  // 반환: 'loaded'(저장본 반영) | 'empty'(저장본 없음=첫 실행) | 'error'(못 읽음).
+  // 영속화 활성은 이 상태로 결정한다 — 'error' 면 켜지 않아 기존 바이트를 덮어쓰지 않는다.
   const loadGameState = useCallback(async () => {
     try {
       let raw = await AsyncStorage.getItem(STORAGE_KEY);
@@ -160,25 +162,31 @@ export default function App() {
         raw = await AsyncStorage.getItem(STORAGE_KEY_V3);
         migratedFromV3 = !!raw; // v4 없고 v3 를 읽었을 때만 마이그레이션.
       }
-      if (raw) {
-        const now = Date.now();
-        const next = tickState(hydrate(JSON.parse(raw), now), now);
-        setGameState(next);
-        // v3→v4 마이그레이션이면 새 키로 먼저 저장한 뒤 옛 v3 키를 지워 죽은 데이터를 남기지 않는다.
-        // v4 가 이미 있으면 v3 를 안 읽었으므로(migratedFromV3=false) 건드리지 않는다.
-        if (migratedFromV3) {
-          await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-          await AsyncStorage.removeItem(STORAGE_KEY_V3);
-        }
+      if (!raw) return 'empty'; // 저장본 없음 = 정상 첫 실행(영속화 켜도 안전).
+      const now = Date.now();
+      const next = tickState(hydrate(JSON.parse(raw), now), now);
+      setGameState(next);
+      // v3→v4 마이그레이션이면 새 키로 먼저 저장한 뒤 옛 v3 키를 지워 죽은 데이터를 남기지 않는다.
+      // v4 가 이미 있으면 v3 를 안 읽었으므로(migratedFromV3=false) 건드리지 않는다.
+      if (migratedFromV3) {
+        await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+        await AsyncStorage.removeItem(STORAGE_KEY_V3);
       }
-    } catch {}
+      return 'loaded';
+    } catch (e) {
+      // 저장본을 못 읽었다(손상 파싱 실패·저장소 일시 오류). 이 상태로 영속화를 켜면 다음 setGameState 가
+      // INITIAL_STATE 파생값을 기존 바이트 위에 덮어써 진행분이 사라진다. 'error' 로 이번 세션 영속화를
+      // 막아 바이트를 보존한다 — 코드 수정·일시 오류 회복 뒤 다음 실행에서 복구할 여지를 남긴다.
+      console.warn('[walkmon] 저장본 로드 실패 — 덮어쓰기 방지로 이번 세션 영속화 보류:', e);
+      return 'error';
+    }
   }, []);
 
-  // 마운트 시 1회 로드
+  // 마운트 시 1회 로드. 로드가 error 가 아니면(정상 로드 또는 저장본 없음) 영속화를 켠다.
   useEffect(() => {
     (async () => {
-      await loadGameState();
-      loaded.current = true;
+      const status = await loadGameState();
+      if (status !== 'error') loaded.current = true;
     })();
   }, [loadGameState]);
 
@@ -192,7 +200,12 @@ export default function App() {
   // loadGameState 가 로드 후 tick 하므로 백그라운드 동안의 미터 감소·건강코드도 함께 정산된다.
   useEffect(() => {
     const sub = AppState.addEventListener('change', (next) => {
-      if (next === 'active') loadGameState();
+      if (next === 'active') {
+        // 마운트 때 로드 실패로 영속화가 꺼졌더라도, 복귀 시 정상 로드되면 그때 켠다(일시 오류 자가 회복).
+        loadGameState().then((status) => {
+          if (status !== 'error') loaded.current = true;
+        });
+      }
     });
     return () => sub.remove();
   }, [loadGameState]);

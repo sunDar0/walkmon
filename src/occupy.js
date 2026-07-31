@@ -16,8 +16,10 @@ import {
   NEW_CELL_POINTS,
   REVISIT_POINTS,
   PATH_FILL_MAX_M,
+  STAGES,
   STAGE_MAX_LEVEL,
   XP_PER_LEVEL,
+  PET_TYPE_COUNT,
   HEALTH_CODES,
   CARE_ACTIONS,
   CARE_AP_COST,
@@ -79,10 +81,20 @@ export function hydrate(parsed, now) {
   // typeof NaN === 'number' 라 옛 typeof 검사는 NaN 을 통과시켰다 → decayMeters→meterFactor→
   // round(NaN) 로 ap 까지 오염. Number.isFinite 로 걸러 오염 전파를 막는다.
   const num = (v, d) => (Number.isFinite(v) ? v : d);
+  // 배열 인덱스로 쓰이는 필드(stageIndex→STAGES, petType→스프라이트 행)는 범위를 벗어나면
+  // STAGES[i] undefined 크래시나 빈 크리처(스프라이트 프레임 없음)를 낳는다. 손상·조작 저장본을
+  // 유효 정수 범위로 클램프해 렌더·성장이 깨지지 않게 한다.
+  const clampInt = (v, lo, hi, d) => {
+    const n = Math.floor(v);
+    return Number.isFinite(n) && n >= lo && n <= hi ? n : d;
+  };
   const dm = INITIAL_STATE.meters;
   return {
     ...INITIAL_STATE,
     ...p,
+    stageIndex: clampInt(p.stageIndex, 0, STAGES.length - 1, 0),
+    stageXp: Math.max(0, num(p.stageXp, 0)),
+    petType: clampInt(p.petType, 0, PET_TYPE_COUNT - 1, 0),
     meters: {
       satiety: num(pm.satiety, dm.satiety),
       happiness: num(pm.happiness, dm.happiness),

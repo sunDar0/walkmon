@@ -26,6 +26,10 @@ export const STAGES = ['알', '유년', '소년', '청년', '성년'];
 export const STAGE_MAX_LEVEL = [10, 20, 30, 40, 50];
 export const XP_PER_LEVEL = 30;
 
+// 크리처 외형 종류 수(스프라이트 아틀라스 행 수와 일치). 성장 규칙엔 영향 없고 외형 전용.
+// 저장본의 petType 검증 범위(hydrate)로 쓴다. WP-8 크리처 정의 테이블 도입 시 이 상수가 그쪽으로 옮겨간다.
+export const PET_TYPE_COUNT = 4;
+
 // 현재 단계 내 레벨. 만렙에서 클램프되므로, 초과 XP 는 stageXp 에만 쌓였다가 진화 시 다음 단계로 이월된다.
 export function levelInStage(stageXp, stageIndex) {
   return Math.min(Math.floor(stageXp / XP_PER_LEVEL), STAGE_MAX_LEVEL[stageIndex]);

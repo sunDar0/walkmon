@@ -2,7 +2,7 @@
 name: location-tracking
 description: >-
   walkmon 위치 추적 작업 — 포그라운드 watchPositionAsync(src/useLocation.js)와
-  백그라운드 expo-task-manager(src/backgroundLocation.js, App 미연결)를 다룬다.
+  백그라운드 expo-task-manager(src/backgroundLocation.js, App 마운트 시 연결됨)를 다룬다.
   위치/GPS/좌표 갱신, 백그라운드 추적, 권한 흐름(foreground→background), expo-task-manager
   defineTask/startLocationUpdatesAsync 작업, 시뮬레이터·브라우저 이동 시뮬레이션을
   손볼 때 사용한다. 후속 신호 — "위치 다시", "추적 재실행", "권한 수정", "백그라운드 보완",
@@ -36,8 +36,8 @@ Expo 는 마이너 버전에서도 위치 옵션 키가 바뀐 적이 있다.
 포그라운드는 React 훅이라 컴포넌트 안에서 산다. 백그라운드는 **OS 가 앱을 깨워 실행**하므로
 React 밖, 모듈 최상위에서 살아야 한다. 이 차이가 아래 모든 제약의 뿌리다.
 
-현재 백그라운드는 **App 에 미연결** 상태다. MVP(포그라운드)가 검증된 뒤 붙인다.
-새로 붙일 때는 `registerBackgroundLocation()` 을 앱 시작 시 한 번 호출하면 된다.
+현재 백그라운드는 **App 에 연결됨** — `App.js` 마운트 effect 가 `registerBackgroundLocation()` 을
+한 번 호출한다. 포그라운드가 active 인 동안엔 배치 처리를 skip 해 단일 writer 를 유지한다.
 
 ## 포그라운드 — src/useLocation.js
 
@@ -175,7 +175,7 @@ watchPositionAsync ─ coords ──▶ cellKeyAt(lat,lng)  (src/grid.js)
 ## 에러 핸들링
 
 권한 거절·좌표 미수신은 한 번 재시도하고, 그래도 안 되면 상태를 `'denied'` 등으로 명시해
-사용자에게 드러낸다(조용히 삼키지 않는다). 백그라운드 미연결처럼 "아직 안 붙은 것"은
+사용자에게 드러낸다(조용히 삼키지 않는다). "아직 안 붙은 것"(예: 걸음수 pedometer 축)은
 누락으로 명시하고 진행한다.
 
 ## 이전 산출물 처리

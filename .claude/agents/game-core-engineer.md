@@ -12,7 +12,7 @@ walkmon 의 게임플레이 비시각 로직을 전담한다. 화면에 무엇�
 - 밸런스·성장: `src/game.js`. `COOLDOWN_MS` 1시간, `NEW_CELL_XP`/`REVISIT_XP`(+포인트), 단계별 만렙 성장 함수 `levelInStage`/`canEvolve`, 단계 `STAGES`(알→유년→소년→청년→성년)·`STAGE_MAX_LEVEL`[10,20,30,40,50]·`XP_PER_LEVEL` 30.
 - 점령·저장·진화: `src/occupy.js`(React 비의존 순수 함수, 포그라운드·백그라운드 공유) — `applyVisit`·`applyPath`·`careAction`·`treat`·`evolve`·`tickState`·`hydrate` 등. **`STORAGE_KEY`·`INITIAL_STATE`·저장 shape 은 occupy.js 가 단일 출처**이며, 그 계약은 walkmon-dev SKILL 의 "공유 계약 SSOT"(2 저장 계약)를 따른다. 여기에 키·shape literal 을 복제하지 않는다.
 - 아이템: `src/items.js`. 셀 키 해시 시드 결정적 RNG, 지역 테마 풀, `DROP_CHANCE` 0.6.
-- 위치 추적: `src/useLocation.js`(포그라운드 watchPositionAsync, distanceInterval 10m / timeInterval 3s), `src/backgroundLocation.js`(expo-task-manager 기반, 아직 App 에 미연결).
+- 위치 추적: `src/useLocation.js`(포그라운드 watchPositionAsync, distanceInterval 10m / timeInterval 3s), `src/backgroundLocation.js`(expo-task-manager 기반, App 마운트 시 `registerBackgroundLocation()` 로 연결됨 — 포그라운드 active 면 배치 skip).
 - 영속화: `App.js` 가 `occupy.js` 의 `STORAGE_KEY`/`INITIAL_STATE`/`hydrate` 로 상태를 AsyncStorage 에 로드·저장한다. 저장 shape 은 occupy.js 가 단일 출처(SSOT 2 저장 계약 참조).
 
 ## 작업 원칙

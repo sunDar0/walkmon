@@ -23,6 +23,7 @@ import {
   HEALTH_CODES,
   CARE_ACTIONS,
   CARE_AP_COST,
+  CARE_COOLDOWN_MS,
   TREAT_AP_COST,
   canEvolve,
   meterFactor,
@@ -47,6 +48,7 @@ export const INITIAL_STATE = {
   ap: 0,
   meters: { satiety: 100, happiness: 100, cleanliness: 100 },
   health: [],
+  careAt: {}, // 액션별 마지막 케어 시각(쿨다운 판정). action -> ms 타임스탬프.
   bornAt: 0,
   stageStartedAt: 0,
   metersUpdatedAt: 0,
@@ -64,6 +66,7 @@ export function newGame(petType, now) {
     ap: 0,
     meters: { satiety: 100, happiness: 100, cleanliness: 100 },
     health: [],
+    careAt: {},
     bornAt: now,
     stageStartedAt: now,
     metersUpdatedAt: now,
@@ -74,6 +77,14 @@ export function newGame(petType, now) {
 //  - 누락 필드는 INITIAL_STATE 기본값으로 메운다(v3→v4 backfill: ap0·meters100·health[]).
 //  - 타임스탬프가 없거나(구버전) 0 이면 now 로 채운다. v4 저장본의 실제 타임스탬프는 보존
 //    (0 이 아니므로) → 이후 tick 이 오프라인 경과를 정산한다.
+// 케어 쿨다운 맵 정규화: 객체가 아니면 {}, 값이 유한수 아니면 그 키를 버린다.
+function sanitizeCareAt(raw) {
+  if (!raw || typeof raw !== 'object') return {};
+  const out = {};
+  for (const k in raw) if (Number.isFinite(raw[k])) out[k] = raw[k];
+  return out;
+}
+
 export function hydrate(parsed, now) {
   const p = parsed || {};
   const pm = p.meters || {};
@@ -102,6 +113,9 @@ export function hydrate(parsed, now) {
     },
     health: Array.isArray(p.health) ? p.health : [],
     ap: num(p.ap, 0),
+    // 케어 쿨다운 타임스탬프 맵. 손상 저장본이 문자열·NaN 을 넣으면 now-값=NaN 으로 버튼이
+    // 영구 잠기므로, 객체가 아니거나 유한수 아닌 값은 버린다(옛 저장본엔 아예 없어 {} backfill).
+    careAt: sanitizeCareAt(p.careAt),
     bornAt: p.bornAt || now,
     stageStartedAt: p.stageStartedAt || now,
     metersUpdatedAt: p.metersUpdatedAt || now,
@@ -234,13 +248,26 @@ export function careAction(state, action, useAP, now) {
   if (!def) return state;
 
   const s = tickState(state, now);
-  const boost = useAP && (s.ap || 0) >= CARE_AP_COST;
 
+  // 실제 회복량 집계. 목표 미터가 이미 만땅이면 회복 0 → 케어 낭비(과식 등)로 보고
+  // XP·AP 를 주지 않는다. 제자리 연타로 미터 만땅에서 XP 를 무한 파밍하던 구멍을 막는다
+  // (다마고치 '배부르면 거부'). XP 처리량은 미터 감쇠 속도에 묶여 이동→AP 경제와 정합.
   const meters = { ...s.meters };
+  let recovered = 0;
   for (const m of Object.keys(def.meters)) {
-    meters[m] = Math.max(0, Math.min(100, meters[m] + def.meters[m]));
+    const before = meters[m];
+    meters[m] = Math.max(0, Math.min(100, before + def.meters[m]));
+    recovered += meters[m] - before;
   }
+  if (recovered <= 0) return s; // 회복 없음: tick 정산만 반영, XP·AP·미터 불변
 
+  // 케어 쿨다운: 같은 액션을 CARE_COOLDOWN_MS 안에 또 하면 무보상 거부. 만땅 근처에서 tick/fix
+  // 마다 전액 XP 를 재획득하던 M-1 파밍을 획득 빈도로 묶는다. 미터 회복은 이미 일어났지만(위)
+  // 회복분을 버리고 s(tick 만) 를 돌려 보상·미터 변화 모두 무효화 → 눌러도 아무 일 없음.
+  const lastAt = Number.isFinite(s.careAt && s.careAt[action]) ? s.careAt[action] : 0;
+  if (now - lastAt < CARE_COOLDOWN_MS) return s;
+
+  const boost = useAP && (s.ap || 0) >= CARE_AP_COST;
   const gainedXp = boost ? def.xp : Math.floor(def.xp / 3);
   const health = judgeHealth(meters, s.health, now);
 
@@ -250,6 +277,7 @@ export function careAction(state, action, useAP, now) {
     health,
     stageXp: s.stageXp + gainedXp,
     ap: boost ? s.ap - CARE_AP_COST : s.ap,
+    careAt: { ...(s.careAt || {}), [action]: now },
   };
 }
 
@@ -268,15 +296,29 @@ export function treat(state, code, now) {
 }
 
 // UI 프리뷰: 이 케어를 지금 하면 얼마 회복되고 XP·AP 가 얼마인지. pixel-render 버튼 라벨용.
-export function previewCare(state, action, useAP) {
+export function previewCare(state, action, useAP, now = Date.now()) {
   const def = CARE_ACTIONS[action];
   if (!def) return null;
+  // careAction 과 같은 거부 판정(만땅·쿨다운)을 미리 노출해 버튼 라벨이 실제 지급과 어긋나지 않게 한다.
+  // wasted=미터 만땅, cooldownRemainingMs>0=쿨다운 중. 둘 중 하나라도면 눌러도 XP·AP 0.
+  const meters = state.meters || {};
+  let recovered = 0;
+  for (const m of Object.keys(def.meters)) {
+    const before = Number.isFinite(meters[m]) ? meters[m] : 0;
+    recovered += Math.max(0, Math.min(100, before + def.meters[m])) - before;
+  }
+  const wasted = recovered <= 0;
+  const lastAt = Number.isFinite(state.careAt && state.careAt[action]) ? state.careAt[action] : 0;
+  const cooldownRemainingMs = Math.max(0, CARE_COOLDOWN_MS - (now - lastAt));
+  const blocked = wasted || cooldownRemainingMs > 0;
   const boost = useAP && (state.ap || 0) >= CARE_AP_COST;
   return {
     label: def.label,
     meters: def.meters,
-    xp: boost ? def.xp : Math.floor(def.xp / 3),
-    apCost: boost ? CARE_AP_COST : 0,
+    xp: blocked ? 0 : boost ? def.xp : Math.floor(def.xp / 3),
+    apCost: blocked ? 0 : boost ? CARE_AP_COST : 0,
+    wasted,
+    cooldownRemainingMs,
   };
 }
 
